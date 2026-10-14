@@ -1,0 +1,323 @@
+from typing import Annotated
+
+from fastapi import Body, Form, Path, Query, Request, Response
+from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from common.annotation.log_annotation import Log
+from common.aspect.db_session import DBSessionDependency
+from common.aspect.interface_auth import UserInterfaceAuthDependency
+from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
+from common.enums import BusinessType
+from common.router import APIRouterPro
+from module_admin.entity.vo.user_vo import CurrentUserModel
+from module_agent.entity.vo.application_vo import ApplicationPageQueryModel
+from module_agent.service.application_service import (
+    ApplicationFolderService,
+    ApplicationPublishService,
+    ApplicationService,
+)
+from module_agent.service.chat_service import ChatService
+from utils.common_util import bytes2file_response
+from utils.log_util import logger
+from utils.response_util import ResponseUtil
+
+application_controller = APIRouterPro(
+    prefix='/agent/application',
+    order_num=22,
+    tags=['智能体管理'],
+    dependencies=[PreAuthDependency()],
+)
+
+
+# ==================== 文件夹 ====================
+
+
+@application_controller.get(
+    '/folder/tree',
+    summary='获取应用文件夹树接口',
+    description='返回树形文件夹结构',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:list')],
+)
+async def get_folder_tree(
+    request: Request,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    result = await ApplicationFolderService.get_folder_tree(query_db)
+    return ResponseUtil.success(data=result)
+
+
+@application_controller.post(
+    '/folder',
+    summary='新建文件夹接口',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:add')],
+)
+@Log(title='智能体文件夹', business_type=BusinessType.INSERT)
+async def create_folder(
+    request: Request,
+    data: Annotated[dict, Body()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await ApplicationFolderService.create_folder(query_db, data, str(current_user.user.user_id))
+    await query_db.commit()
+    logger.info('新建文件夹成功')
+    return ResponseUtil.success(data=result)
+
+
+@application_controller.put(
+    '/folder/{folder_id}',
+    summary='重命名文件夹接口',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:edit')],
+)
+async def rename_folder(
+    request: Request,
+    folder_id: Annotated[int, Path(description='文件夹id')],
+    data: Annotated[dict, Body()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    await ApplicationFolderService.rename_folder(query_db, folder_id, data.get('name') or '')
+    await query_db.commit()
+    logger.info('重命名文件夹成功')
+    return ResponseUtil.success(msg='操作成功')
+
+
+@application_controller.delete(
+    '/folder/{folder_id}',
+    summary='删除文件夹接口（应用回归根）',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:edit')],
+)
+async def delete_folder(
+    request: Request,
+    folder_id: Annotated[int, Path(description='文件夹id')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    await ApplicationFolderService.delete_folder(query_db, folder_id)
+    await query_db.commit()
+    logger.info('删除文件夹成功')
+    return ResponseUtil.success(msg='操作成功')
+
+
+# ==================== 智能体 CRUD ====================
+
+
+@application_controller.get(
+    '/list',
+    summary='获取智能体分页列表接口',
+    description='按文件夹/名称/类型/状态/负责人筛选分页；含状态派生与最新版本',
+    response_model=None,
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:list')],
+)
+async def query_application_list(
+    request: Request,
+    query_object: Annotated[ApplicationPageQueryModel, Query()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    result = await ApplicationService.list_applications(query_db, query_object)
+    logger.info('获取智能体列表成功')
+    return ResponseUtil.success(model_content=result)
+
+
+@application_controller.post(
+    '',
+    summary='新建智能体接口',
+    description='类型必选（SIMPLE/WORK_FLOW），创建后不可修改；名称唯一',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:add')],
+)
+@Log(title='智能体管理', business_type=BusinessType.INSERT)
+async def insert_application(
+    request: Request,
+    data: Annotated[dict, Body()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await ApplicationService.create_application(query_db, data, str(current_user.user.user_id))
+    await query_db.commit()
+    logger.info(f'新建智能体成功：{result}')
+    return ResponseUtil.success(data=result)
+
+
+@application_controller.put(
+    '/{app_id}',
+    summary='编辑智能体接口',
+    description='保存编辑态配置（不触发发布）；类型不可变更',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:edit')],
+)
+@Log(title='智能体管理', business_type=BusinessType.UPDATE)
+async def update_application(
+    request: Request,
+    app_id: Annotated[int, Path(description='智能体id')],
+    data: Annotated[dict, Body()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    await ApplicationService.update_application(query_db, app_id, data, str(current_user.user.user_id))
+    await query_db.commit()
+    logger.info(f'编辑智能体成功：{app_id}')
+    return ResponseUtil.success(msg='操作成功')
+
+
+@application_controller.get(
+    '/{app_id}',
+    summary='获取智能体详情接口',
+    description='编辑预填（含全部配置列、发布状态与最新版本）',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:list')],
+)
+async def query_application_detail(
+    request: Request,
+    app_id: Annotated[int, Path(description='智能体id')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    result = await ApplicationService.get_application_detail(query_db, app_id)
+    logger.info(f'获取智能体详情成功：{app_id}')
+    return ResponseUtil.success(data=result)
+
+
+@application_controller.delete(
+    '/{app_id}',
+    summary='删除智能体接口',
+    description='物理删除例外：级联删除版本/会话/长期记忆，并清理调度任务',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:delete')],
+)
+@Log(title='智能体管理', business_type=BusinessType.DELETE)
+async def delete_application(
+    request: Request,
+    app_id: Annotated[int, Path(description='智能体id')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    from module_agent.long_term_memory.scheduler import LongTermMemoryScheduler
+
+    LongTermMemoryScheduler.remove_jobs(app_id)
+    await ApplicationService.delete_application(query_db, app_id)
+    await query_db.commit()
+    logger.info(f'删除智能体成功：{app_id}')
+    return ResponseUtil.success(msg='操作成功')
+
+
+@application_controller.post(
+    '/export',
+    summary='导出智能体列表接口',
+    description='导出当前筛选结果（全量）',
+    response_class=StreamingResponse,
+    responses={200: {'description': '流式返回excel', 'content': {'application/octet-stream': {}}}},
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:export')],
+)
+@Log(title='智能体管理', business_type=BusinessType.EXPORT)
+async def export_application_list(
+    request: Request,
+    query_object: Annotated[ApplicationPageQueryModel, Form()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    result = await ApplicationService.export_applications(query_db, query_object)
+    logger.info('导出智能体列表成功')
+    return ResponseUtil.streaming(data=bytes2file_response(result))
+
+
+# ==================== 发布 / 版本 / 工作流 ====================
+
+
+@application_controller.post(
+    '/{app_id}/publish',
+    summary='发布智能体接口',
+    description='全量配置快照 + is_publish 置位；高级（WORK_FLOW）阻断（APP-3006）',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:publish')],
+)
+@Log(title='智能体发布', business_type=BusinessType.OTHER)
+async def publish_application(
+    request: Request,
+    app_id: Annotated[int, Path(description='智能体id')],
+    data: Annotated[dict, Body()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await ApplicationPublishService.publish(
+        query_db, app_id, data, str(current_user.user.user_id), str(current_user.user.user_name or '')
+    )
+    await query_db.commit()
+    logger.info(f'发布智能体成功：{app_id} -> {result}')
+    return ResponseUtil.success(data=result)
+
+
+@application_controller.get(
+    '/{app_id}/versions',
+    summary='获取版本历史接口',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:list')],
+)
+async def query_versions(
+    request: Request,
+    app_id: Annotated[int, Path(description='智能体id')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    result = await ApplicationPublishService.get_version_history(query_db, app_id)
+    return ResponseUtil.success(data=result)
+
+
+@application_controller.get(
+    '/{app_id}/workflow',
+    summary='获取工作流JSON接口',
+    description='编辑态 work_flow JSON 原样读取（画布等 HLD-04 接入）',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:list')],
+)
+async def query_workflow(
+    request: Request,
+    app_id: Annotated[int, Path(description='智能体id')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    result = await ApplicationPublishService.get_workflow(query_db, app_id)
+    return ResponseUtil.success(data=result)
+
+
+@application_controller.put(
+    '/{app_id}/workflow',
+    summary='保存工作流JSON接口',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:edit')],
+)
+async def update_workflow(
+    request: Request,
+    app_id: Annotated[int, Path(description='智能体id')],
+    data: Annotated[dict, Body()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    await ApplicationPublishService.update_workflow(query_db, app_id, data)
+    await query_db.commit()
+    return ResponseUtil.success(msg='操作成功')
+
+
+# ==================== 调试通道 ====================
+
+
+@application_controller.post(
+    '/{app_id}/debug-chat',
+    summary='调试对话接口',
+    description='debug=true 读编辑态执行；不落库仅缓存留痕；SSE chunk 协议同对话接口',
+    response_class=StreamingResponse,
+    responses={200: {'description': '流式返回对话结果', 'content': {'text/event-stream': {}}}},
+    dependencies=[UserInterfaceAuthDependency('agent:application:chat:debug')],
+)
+async def debug_chat(
+    request: Request,
+    app_id: Annotated[int, Path(description='智能体id')],
+    data: Annotated[dict, Body()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await ChatService.chat(
+        query_db,
+        request.app.state.redis,
+        {
+            'application_id': app_id,
+            'chat_id': data.get('chat_id'),
+            'message': data.get('message'),
+            'stream': data.get('stream', True),
+            're_chat': data.get('re_chat', False),
+            'chat_record_id': data.get('chat_record_id'),
+            'form_data': data.get('form_data'),
+            'debug': True,
+        },
+        user_id=str(current_user.user.user_id),
+        user_type='PLATFORM_USER',
+        ip_address=request.client.host if request.client else None,
+        source={'type': 'DEBUG'},
+    )
+    logger.info(f'调试对话请求：{app_id}')
+    return result

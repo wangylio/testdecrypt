@@ -1,0 +1,129 @@
+from typing import Annotated
+
+from fastapi import Body, Path, Query, Request, Response
+from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from common.aspect.db_session import DBSessionDependency
+from common.aspect.interface_auth import UserInterfaceAuthDependency
+from common.aspect.pre_auth import CurrentUserDependency, PreAuthDependency
+from common.router import APIRouterPro
+from module_admin.entity.vo.user_vo import CurrentUserModel
+from module_agent.service.chat_service import ChatService
+from utils.log_util import logger
+from utils.response_util import ResponseUtil
+
+chat_controller = APIRouterPro(
+    prefix='/agent/chat',
+    order_num=23,
+    tags=['智能体对话'],
+    dependencies=[PreAuthDependency()],
+)
+
+
+@chat_controller.post(
+    '/stream',
+    summary='发起/续接对话接口',
+    description='SSE chunk 协议返回；生产通道读最新发布版本（未发布拒绝）；debug=true 读编辑态',
+    response_class=StreamingResponse,
+    responses={200: {'description': '流式返回对话结果', 'content': {'text/event-stream': {}}}},
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:list')],
+)
+async def chat_stream(
+    request: Request,
+    data: Annotated[dict, Body()],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    result = await ChatService.chat(
+        query_db,
+        request.app.state.redis,
+        {
+            'application_id': data.get('application_id'),
+            'chat_id': data.get('chat_id'),
+            'message': data.get('message'),
+            'stream': data.get('stream', True),
+            're_chat': data.get('re_chat', False),
+            'chat_record_id': data.get('chat_record_id'),
+            'form_data': data.get('form_data'),
+            'debug': bool(data.get('debug', False)),
+        },
+        user_id=str(current_user.user.user_id),
+        user_type='PLATFORM_USER',
+        ip_address=request.client.host if request.client else None,
+        source={'type': 'ONLINE'},
+    )
+    logger.info(f'对话请求：application_id={data.get("application_id")}, debug={data.get("debug", False)}')
+    return result
+
+
+@chat_controller.get(
+    '/open',
+    summary='打开会话接口',
+    description='按应用创建/定位会话，返回 chat_id + 开场白',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:list')],
+)
+async def open_chat(
+    request: Request,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+    application_id: Annotated[int, Query(description='智能体id')],
+) -> Response:
+    result = await ChatService.open_chat(
+        query_db,
+        request.app.state.redis,
+        application_id,
+        str(current_user.user.user_id),
+        request.client.host if request.client else None,
+    )
+    await query_db.commit()
+    return ResponseUtil.success(data=result)
+
+
+@chat_controller.get(
+    '/list',
+    summary='获取会话列表接口',
+    description='当前对话者的会话分页',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:list')],
+)
+async def query_chat_list(
+    request: Request,
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+    page_num: Annotated[int, Query(description='页码', alias='pageNum')] = 1,
+    page_size: Annotated[int, Query(description='每页条数', alias='pageSize')] = 10,
+) -> Response:
+    result = await ChatService.list_chats(query_db, str(current_user.user.user_id), page_num, page_size)
+    return ResponseUtil.success(model_content=result)
+
+
+@chat_controller.get(
+    '/{chat_id}/records',
+    summary='获取会话轮次明细接口',
+    description='含引用/工具/计量（details）',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:list')],
+)
+async def query_chat_records(
+    request: Request,
+    chat_id: Annotated[int, Path(description='会话id')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+) -> Response:
+    result = await ChatService.get_chat_records(query_db, chat_id)
+    return ResponseUtil.success(data=result)
+
+
+@chat_controller.delete(
+    '/{chat_id}',
+    summary='结束会话接口',
+    description='记录保留，缓存清除，界面二次确认',
+    dependencies=[UserInterfaceAuthDependency('agent:application:app:list')],
+)
+async def delete_chat(
+    request: Request,
+    chat_id: Annotated[int, Path(description='会话id')],
+    query_db: Annotated[AsyncSession, DBSessionDependency()],
+    current_user: Annotated[CurrentUserModel, CurrentUserDependency()],
+) -> Response:
+    await ChatService.delete_chat(query_db, request.app.state.redis, chat_id, str(current_user.user.user_id))
+    logger.info(f'结束会话成功：{chat_id}')
+    return ResponseUtil.success(msg='操作成功')

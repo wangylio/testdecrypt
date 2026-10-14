@@ -1,0 +1,216 @@
+from typing import Any
+
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from common.vo import PageModel
+from module_agent.entity.do.document_tag_do import ZclawDocumentTag
+from module_agent.entity.do.tag_do import ZclawTag
+from module_agent.entity.vo.tag_vo import TagModel, TagPageQueryModel
+from utils.page_util import PageUtil
+
+
+class TagDao:
+    """
+    标签数据库操作层（含文档-标签关联）
+    """
+
+    @classmethod
+    async def query_by_id(cls, db: AsyncSession, tag_id: int) -> ZclawTag | None:
+        """
+        根据标签主键获取标签信息
+
+        :param db: orm对象
+        :param tag_id: 标签主键
+        :return: 标签信息对象
+        """
+        return (await db.execute(select(ZclawTag).where(ZclawTag.tag_id == tag_id))).scalars().first()
+
+    @classmethod
+    async def query_by_kv(
+        cls, db: AsyncSession, kb_id: int, tag_key: str, tag_value: str, exclude_id: int | None = None
+    ) -> ZclawTag | None:
+        """
+        根据知识库+键+值查询标签（用于唯一性校验）
+
+        :param db: orm对象
+        :param kb_id: 知识库主键
+        :param tag_key: 标签键
+        :param tag_value: 标签值
+        :param exclude_id: 排除的标签主键（编辑场景）
+        :return: 标签信息对象
+        """
+        query = select(ZclawTag).where(
+            ZclawTag.kb_id == kb_id,
+            ZclawTag.tag_key == tag_key,
+            ZclawTag.tag_value == tag_value,
+        )
+        if exclude_id:
+            query = query.where(ZclawTag.tag_id != exclude_id)
+
+        return (await db.execute(query)).scalars().first()
+
+    @classmethod
+    async def query_list(
+        cls, db: AsyncSession, query_object: TagPageQueryModel, is_page: bool = True
+    ) -> PageModel | list[dict[str, Any]]:
+        """
+        根据查询参数获取标签列表信息
+
+        :param db: orm对象
+        :param query_object: 查询参数对象
+        :param is_page: 是否开启分页
+        :return: 标签列表信息对象
+        """
+        query = (
+            select(ZclawTag)
+            .where(
+                ZclawTag.kb_id == query_object.kb_id if query_object.kb_id else True,
+                ZclawTag.tag_key == query_object.tag_key if query_object.tag_key else True,
+                ZclawTag.tag_value.like(f'%{query_object.tag_value}%') if query_object.tag_value else True,
+            )
+            .order_by(ZclawTag.tag_key.asc(), ZclawTag.tag_value.asc(), ZclawTag.tag_id.asc())
+        )
+
+        return await PageUtil.paginate(db, query, query_object.page_num, query_object.page_size, is_page)
+
+    @classmethod
+    async def count_docs_by_tag_ids(cls, db: AsyncSession, tag_ids: list[int]) -> dict[int, int]:
+        """
+        按标签聚合关联文档数（派生统计）
+
+        :param db: orm对象
+        :param tag_ids: 标签主键列表
+        :return: {标签主键: 文档数} 映射
+        """
+        if not tag_ids:
+            return {}
+        query = (
+            select(ZclawDocumentTag.tag_id, func.count().label('doc_count'))
+            .where(ZclawDocumentTag.tag_id.in_(tag_ids))
+            .group_by(ZclawDocumentTag.tag_id)
+        )
+
+        return {row[0]: row[1] for row in (await db.execute(query)).all()}
+
+    @classmethod
+    async def insert(cls, db: AsyncSession, data: TagModel) -> ZclawTag:
+        """
+        新增标签数据库操作
+
+        :param db: orm对象
+        :param data: 标签对象
+        :return: 标签信息对象
+        """
+        db_obj = ZclawTag(**data.model_dump(exclude_unset=True, exclude={'create_time', 'update_time', 'doc_count'}))
+        db.add(db_obj)
+        await db.flush()
+
+        return db_obj
+
+    @classmethod
+    async def update(cls, db: AsyncSession, data: dict) -> None:
+        """
+        更新标签数据库操作
+
+        :param db: orm对象
+        :param data: 需要更新的标签字典（必须携带tag_id）
+        :return: None
+        """
+        update_values = {
+            key: value for key, value in data.items() if key not in {'create_time', 'update_time', 'create_by', 'doc_count'}
+        }
+        tag_id = update_values.pop('tag_id')
+        await db.execute(update(ZclawTag).where(ZclawTag.tag_id == tag_id).values(**update_values))
+
+    @classmethod
+    async def delete(cls, db: AsyncSession, tag_id: int) -> None:
+        """
+        删除标签数据库操作（关联解除由服务层先编排）
+
+        :param db: orm对象
+        :param tag_id: 标签主键
+        :return: None
+        """
+        await db.execute(delete(ZclawTag).where(ZclawTag.tag_id == tag_id))
+
+    @classmethod
+    async def delete_list(cls, db: AsyncSession, tag_ids: list[int]) -> None:
+        """
+        批量删除标签数据库操作
+
+        :param db: orm对象
+        :param tag_ids: 标签主键列表
+        :return: None
+        """
+        if not tag_ids:
+            return
+        await db.execute(delete(ZclawTag).where(ZclawTag.tag_id.in_(tag_ids)))
+
+    @classmethod
+    async def delete_by_kb(cls, db: AsyncSession, kb_id: int) -> None:
+        """
+        按知识库删除标签定义（知识库删除级联；文档关联已随文档清理）
+
+        :param db: orm对象
+        :param kb_id: 知识库主键
+        :return: None
+        """
+        await db.execute(delete(ZclawTag).where(ZclawTag.kb_id == kb_id))
+
+    @classmethod
+    async def query_mappings_by_tag(cls, db: AsyncSession, tag_id: int) -> list[ZclawDocumentTag]:
+        """
+        查询标签的文档关联列表
+
+        :param db: orm对象
+        :param tag_id: 标签主键
+        :return: 关联列表
+        """
+        return list((await db.execute(select(ZclawDocumentTag).where(ZclawDocumentTag.tag_id == tag_id))).scalars().all())
+
+    @classmethod
+    async def query_mappings_by_doc(cls, db: AsyncSession, doc_id: int) -> list[ZclawDocumentTag]:
+        """
+        查询文档的标签关联列表
+
+        :param db: orm对象
+        :param doc_id: 文档主键
+        :return: 关联列表
+        """
+        return list((await db.execute(select(ZclawDocumentTag).where(ZclawDocumentTag.doc_id == doc_id))).scalars().all())
+
+    @classmethod
+    async def insert_mappings(cls, db: AsyncSession, items: list[dict]) -> None:
+        """
+        批量新增文档-标签关联
+
+        :param db: orm对象
+        :param items: 关联字典列表（doc_id/tag_id/create_by）
+        :return: None
+        """
+        if not items:
+            return
+        db.add_all([ZclawDocumentTag(**item) for item in items])
+        await db.flush()
+
+    @classmethod
+    async def delete_mappings(
+        cls, db: AsyncSession, *, tag_id: int | None = None, doc_ids: list[int] | None = None
+    ) -> None:
+        """
+        删除文档-标签关联（按标签或按文档集合）
+
+        :param db: orm对象
+        :param tag_id: 标签主键（删除标签时解除全部关联）
+        :param doc_ids: 文档主键列表（批量解绑/文档删除联动）
+        :return: None
+        """
+        conditions = []
+        if tag_id is not None:
+            conditions.append(ZclawDocumentTag.tag_id == tag_id)
+        if doc_ids:
+            conditions.append(ZclawDocumentTag.doc_id.in_(doc_ids))
+        if not conditions:
+            return
+        await db.execute(delete(ZclawDocumentTag).where(*conditions))
