@@ -1,0 +1,51 @@
+"""database 能力包的后端：把 core/database/oracle 驱动暴露为平台能力。
+
+模块级注册表 {db_id: OracleEngine}，惰性建池；async facade 经 asyncio.to_thread
+包同步引擎，供本能力包 executor（SQL 生成/执行）调用。本模块只认 db_id，
+对具体数据库实例（哪个库、什么账号）无感知——领域差异全部收在 resources/databases.yaml
+与 definitions/<agent>/tools/database_defs/*.yaml。
+"""
+from __future__ import annotations
+
+import asyncio
+
+from app.core.logging import get_logger
+from app.core.database.oracle import DatabaseSpec, OracleEngine, OracleError, load_specs
+
+logger = get_logger(__name__)
+
+_SPECS: dict[str, DatabaseSpec] = {}
+_ENGINES: dict[str, OracleEngine] = {}
+
+
+def register_all_databases() -> None:
+    """从 resources/databases.yaml 加载数据库目录并登记（只读配置，不触发连接）。"""
+    _SPECS.clear()
+    _SPECS.update(load_specs())
+    logger.info("数据库目录装配", databases=sorted(_SPECS))
+
+
+def get(db_id: str) -> OracleEngine:
+    """按 db_id 取引擎（首次惰性建池）。未注册或凭据缺失时报可读错误。"""
+    if db_id not in _SPECS:
+        raise OracleError(f"未注册的数据库 id：{db_id}")
+    engine = _ENGINES.get(db_id)
+    if engine is None:
+        engine = OracleEngine(_SPECS[db_id])
+        _ENGINES[db_id] = engine
+    return engine
+
+
+async def run_query(db_id: str, sql: str, binds: dict | None = None, limit: int = 100) -> dict:
+    """在 db_id 对应数据库执行查询（同步引擎经线程池执行）。"""
+    return await asyncio.to_thread(get(db_id).run_query, sql, binds, limit)
+
+
+async def close_databases() -> None:
+    """释放全部连接池（应用退出时调用）。单个关闭异常不阻塞其余。"""
+    for db_id, engine in _ENGINES.items():
+        try:
+            engine.close()
+        except Exception:  # noqa: BLE001 - 关闭异常只记录，不阻断整体退出
+            logger.warning("数据库连接池关闭异常", db=db_id, exc_info=True)
+    _ENGINES.clear()

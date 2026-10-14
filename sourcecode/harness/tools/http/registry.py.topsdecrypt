@@ -1,0 +1,76 @@
+"""http 能力包的注册表：把 HttpToolDef 构建为 Agent 可调用的 StructuredTool。
+
+业务无关：工具执行统一走本能力包 backend（端点 id 由 HttpToolDef.endpoint 指定），
+领域差异全部收在 YAML 定义中。错误统一转为模型可见的可读提示，不抛原始堆栈。
+"""
+from __future__ import annotations
+
+import asyncio
+from typing import Optional
+
+from langchain_core.tools import StructuredTool
+from pydantic import ConfigDict, Field, create_model
+
+from app.core.logging import get_logger
+from app.core.http.client import HttpError
+from app.harness.tools._time import ToolInputError
+from app.harness.tools.http.defs import HttpToolDef
+from app.harness.tools.http.executor import execute_tool
+
+logger = get_logger(__name__)
+
+# 工具级超时（秒）。对外部系统调用设置上限，防异常挂起 / 慢接口拖住 Agent。
+TOOL_TIMEOUT_SECONDS = 30
+
+# 声明类型 → pydantic 字段类型（date 以 ISO / 相对表达式字符串传入）
+_PY_TYPE = {"string": str, "number": float, "integer": int, "boolean": bool, "date": str}
+
+
+def _field(field_type: str, description: str, required: bool) -> tuple:
+    """声明类型 → pydantic create_model 字段定义（必填 Required / 可选 Optional）。"""
+    py_type = _PY_TYPE.get(field_type, str)
+    if required:
+        return (py_type, Field(..., description=description))
+    return (Optional[py_type], Field(default=None, description=description))
+
+
+def build_args_model(def_: HttpToolDef):
+    """由定义生成工具的入参 pydantic 模型（动态 args_schema）。
+
+    extra="ignore"：未知多余入参忽略，保留「可选参数」的宽松调用语义
+    （对应原 FunctionTool 的 strict_json_schema=False）。模型只能填声明过的参数。
+    """
+    fields: dict[str, tuple] = {}
+    for p in def_.params:
+        fields[p.name] = _field(p.type, p.description, p.required)
+    return create_model(
+        f"{def_.name.capitalize()}Args",
+        __config__=ConfigDict(extra="ignore"),
+        **fields,
+    )
+
+
+def make_agent_tool(def_: HttpToolDef) -> StructuredTool:
+    """把一个 HttpToolDef 封装为 StructuredTool（入参 schema 动态生成）。
+
+    工具只提供 coroutine（异步执行）；Agent 侧必须走 ainvoke 的 async 路径
+    才可调用（同步 invoke 会报 NotImplementedError）。平台 run_agent 本就 async，符合约定。
+    """
+
+    async def invoke(**kwargs) -> str:
+        try:
+            return await asyncio.wait_for(execute_tool(def_, kwargs), TOOL_TIMEOUT_SECONDS)
+        except (ToolInputError, HttpError) as exc:
+            return str(exc)
+        except asyncio.TimeoutError:
+            return f"查询超时（>{TOOL_TIMEOUT_SECONDS}s）：{def_.name}。请重试。"
+        except Exception as exc:  # noqa: BLE001 - 兜底：不向模型泄露原始堆栈
+            logger.exception("外部接口工具异常", tool=def_.name)
+            return f"查询失败：{exc}。请重试或缩小查询范围。"
+
+    return StructuredTool(
+        name=def_.name,
+        description=def_.description,
+        args_schema=build_args_model(def_),
+        coroutine=invoke,
+    )

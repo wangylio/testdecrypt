@@ -1,0 +1,79 @@
+"""LLM 模型注册表：以名称登记可选模型，供 Agent 装配时按名取用。
+
+LangChain 模型在装配时构造（create_agent 需要 BaseChatModel 实例），
+平台经 init_chat_model 按「MODELS 字符串表」解析：名称 → 带 openai: 前缀的
+模型标识 → 构造指定通道的 chat model。通道统一走 OpenAI 兼容接口：
+
+- OpenAI 官方（default/reasoning）：openai_base_url + openai_api_key
+- DeepSeek（deepseek）：openai: 前缀 + deepseek_base_url + deepseek_api_key
+
+不引入 langchain-deepseek：DeepSeek 即 OpenAI 兼容服务，用 base_url 指到即可。
+
+缺密钥处置（用户拍板·方案1）：模型构造在 openai>=2.45 下遇空 key 会抛错，
+本层不缓存失败构造；Agent 装配捕获异常后跳过该 Agent，应用仍可启动，
+/health、/agents 可用（只缺对应 Agent）。
+
+配置来自 app/core/config/settings.py（读 .env）。
+"""
+from __future__ import annotations
+
+from langchain.chat_models import init_chat_model
+from langchain_core.language_models.chat_models import BaseChatModel
+
+from app.core.config.settings import settings
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+# 命名模型注册表：name -> 带 openai: 前缀的模型标识（.env / 配置驱动）
+MODELS: dict[str, str] = {
+    "default": f"openai:{settings.openai_model}",  # 默认 / 快速（OpenAI 官方）
+    "deepseek": f"openai:{settings.deepseek_model}",  # DeepSeek 第三方（OpenAI 兼容通道）
+}
+
+# 已构造的模型实例缓存：name -> BaseChatModel（避免重复解析/构造）
+_cache: dict[str, BaseChatModel] = {}
+
+
+class ModelNotFoundError(KeyError):
+    """按名称获取模型时未找到。"""
+
+
+class ModelInitError(Exception):
+    """模型构造失败（如缺 API key / 通道配置错误）；装配层据此跳过依赖它的 Agent。"""
+
+
+def _init_model(identifier: str, name: str) -> BaseChatModel:
+    """按通道名构造模型：DeepSeek 通道走 OpenAI 兼容 base_url，其余走 OpenAI 官方。"""
+    if name == "deepseek":
+        # 思考开关：按配置透传 reasoning_effort（默认"none"关闭思考，见 settings.py）。
+        effort = settings.deepseek_reasoning_effort
+        kwargs = {"reasoning_effort": effort} if effort else {}
+        return init_chat_model(
+            identifier,
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            **kwargs,
+        )
+    return init_chat_model(
+        identifier,
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+    )
+
+
+def get_model(name: str = "default") -> BaseChatModel:
+    """按名称返回缓存实例；未注册抛 ModelNotFoundError 点名清单。
+
+    构造失败（如缺 key）抛 ModelInitError 且不缓存，由 Agent 装配层捕获后
+    跳过该 Agent，不阻塞应用启动。
+    """
+    if name not in MODELS:
+        raise ModelNotFoundError(f"模型 '{name}' 未注册，可选：{list(MODELS)}")
+    if name not in _cache:
+        try:
+            _cache[name] = _init_model(MODELS[name], name)
+        except Exception as exc:  # noqa: BLE001 - 构造失败统一转可读错误，不缓存
+            logger.warning("模型构造失败，依赖它的 Agent 将被跳过", model=name, error=str(exc))
+            raise ModelInitError(f"模型 '{name}' 构造失败（缺密钥或通道配置错误）：{exc}") from exc
+    return _cache[name]

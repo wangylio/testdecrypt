@@ -1,0 +1,109 @@
+"""http 能力包的数据驱动工具定义模型与加载：外部接口工具以声明数据（YAML）承载。
+
+只做模板式（不做 declarative）：REST 的路径/参数/body 结构由外部系统定死，
+无法像 SQL 那样由引擎自动生成 SELECT。业务差异全部收在定义中，
+引擎与 Agent 代码对业务无感知。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel, Field, model_validator
+
+_TypeName = Literal["string", "number", "integer", "boolean", "date"]
+_Location = Literal["path", "query", "body", "header"]
+_Method = Literal["GET", "POST", "PUT", "DELETE"]
+
+
+class HttpParamSpec(BaseModel):
+    """一个具名参数的声明：name/type/description/required/default + 请求定位 location。"""
+
+    name: str
+    type: _TypeName = "string"
+    description: str = ""
+    required: bool = False
+    default: str | None = None
+    location: _Location = "query"  # path 替换 {ph}；query 加查询串；body 进 JSON；header 进请求头
+
+
+class HttpToolDef(BaseModel):
+    """一个外部接口工具的定义。
+
+    - endpoint：指向 resources/endpoints.yaml 的 id（与 database 的 db: <id> 同构）。
+    - method：GET/POST 等；"只读"是语义约束（外部系统限定），传输方法按接口实际声明。
+    - path：请求路径，含 {placeholder} 供 location=path 的参数替换。
+    - body：请求体模板（可选）。整段声明 body 结构，静态字段原样下发，
+      {placeholder} 精确整串替换为参数值（支持嵌套，如 paramsMap 包裹）。
+      缺省时按 params 的 location=body 参数平铺生成 body。
+    - result_path：响应 JSON 中数据列表的点路径（如 data.records）。
+    - success_field / success_value：业务成功判定。缺省查 "code" 字段且值属 0/200；
+      有些接口用 success=true、errorCode="success" 等，可声明调整。
+    - columns：结果列 + 内联中文名（`orderNo: 评审单号`），供 format_result 表头。
+    - translate_columns：编码列 → 编码引用标识（见 resources/codelists.yaml），复用 codelist 翻译。
+    """
+
+    name: str
+    description: str
+    endpoint: str  # 使用的端点 id（见 resources/endpoints.yaml）
+    method: _Method = "POST"
+    path: str
+    params: list[HttpParamSpec] = Field(default_factory=list)
+    body: dict | None = None  # 请求体模板（嵌 {param} 占位符）；缺省按 params 平铺
+    result_path: str = "data.records"
+    success_field: str = "code"  # 判定业务成功的响应字段名
+    success_value: str | int | bool | None = None  # 期望的成功值；None 沿用 0/200
+    columns: list[str] = Field(default_factory=list)
+    column_labels: dict[str, str] = Field(default_factory=dict)  # 列名→中文名（由 columns 解析）
+    translate_columns: dict[str, str] = Field(default_factory=dict)
+    codelist_db: str | None = None  # 编码列翻译的数据源 id（codelist 注册表按 db 隔离；缺省回退 endpoint id）
+    limit: int = 20
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> "HttpToolDef":
+        if not self.path:
+            raise ValueError(f"工具 '{self.name}': 必须指定 path")
+        self._parse_columns()
+        return self
+
+    def _parse_columns(self) -> None:
+        """解析 columns 的内联中文名声明（`orderNo: 评审单号` 形式）。
+
+        元素可为裸列名（`orderNo`，中文名回退为列名本身）或带中文名（`orderNo: 评审单号`）。
+        展示（format_result 表头）用中文名；取值（从响应记录读 key）用裸列名。
+        """
+        self.column_labels = {}
+        for col in self.columns:
+            name, sep, label = col.partition(":")
+            if sep and label.strip():
+                self.column_labels[name.strip()] = label.strip()
+
+    @property
+    def select_columns(self) -> list[str]:
+        """供取值的裸列名列表（去掉内联中文名部分）。"""
+        return [col.partition(":")[0].strip() for col in self.columns]
+
+    @property
+    def column_headers(self) -> list[str]:
+        """供展示用的表头（有中文名用中文名，否则回退裸列名）。"""
+        return [self.column_labels.get(col, col) for col in self.select_columns]
+
+    @property
+    def code_refs(self) -> dict[str, str]:
+        """需翻译的列 → 编码引用标识（translate_columns 原样，供 format_result 翻译用）。"""
+        return dict(self.translate_columns)
+
+
+def load_tool_defs(directory: Path) -> list[HttpToolDef]:
+    """加载目录下全部 *.yaml 工具定义（按文件名排序）。"""
+    defs: list[HttpToolDef] = []
+    for path in sorted(directory.glob("*.yaml")):
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not data:
+            continue
+        if not isinstance(data, list):
+            raise ValueError(f"工具定义文件 {path} 须为 YAML 列表")
+        for item in data:
+            defs.append(HttpToolDef.model_validate(item))
+    return defs

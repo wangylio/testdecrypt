@@ -1,0 +1,27 @@
+# 工艺数据比对域工具定义：查询生产工单的箱贴打标数据（markdata）明细。
+#
+# 按生产工单号（moline 单号）经 MESMOLINEMARKDATAAPPLY → MESMOLINEMARKDATA →
+# MESMOLINEMARKDATACONTENT 关联，取该工单箱贴打标数据的项目名称（dataitemname）与
+# 项目值（dataitemvalue）。不按 sortcode 过滤，按 md.sortcode 升序取第一行（主打标数据）。
+# 表名加 BASIC. 前缀（只读账号直连约定，与 esop.yaml / moline.yaml 一致）。
+# 入参一律绑定变量（:moline_docno），值不进入 SQL 文本。
+
+- name: query_markdata
+  description: 按生产工单号（moline 单号，如 D1MO260226003-001）查询该工单的箱贴打标数据明细（dataitemname 打标项目名称、dataitemvalue 打标项目值），按 sortcode 升序取第一行主打标数据。用于回答"某生产工单的箱贴打标数据 / 箱贴打标 / 打标项目及取值"等问题。
+  mode: template
+  db: mes
+  sql: |
+    SELECT dataitemname, dataitemvalue FROM (
+        SELECT mdc.dataitemname, mdc.dataitemvalue
+        FROM BASIC.MESMOLINEMARKDATACONTENT mdc
+        LEFT JOIN BASIC.MESMOLINEMARKDATA md ON md.id = mdc.markdataid
+        LEFT JOIN BASIC.MESMOLINEMARKDATAAPPLY a ON a.molineid = md.molineid
+        WHERE a.molinedocno = :moline_docno
+        ORDER BY md.sortcode
+    ) WHERE ROWNUM = 1
+  params:
+    - name: moline_docno
+      type: string
+      description: 生产工单号（moline 单号，必填，如 D1MO260226003-001）
+      required: true
+  limit: 200

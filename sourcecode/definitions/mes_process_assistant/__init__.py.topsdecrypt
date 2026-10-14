@@ -1,0 +1,8 @@
+"""工艺助手业务包：mes_process_assistant Agent 定义与工艺域工具定义。
+
+对外只暴露 register() 供应用入口装配；实现见 agent.py，
+数据驱动工具见 tools/database_defs/ 与 tools/http_defs/。承载规则见 app/definitions/__init__.py。
+"""
+from app.definitions.mes_process_assistant.agent import register
+
+__all__ = ["register"]

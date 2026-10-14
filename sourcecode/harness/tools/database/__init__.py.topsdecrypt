@@ -1,0 +1,37 @@
+"""database 能力包：数据库查询这一项完整、自治的能力。
+
+整合定义（defs.py）、SQL 生成与执行（executor.py）、后端连接（backend.py）、
+Agent 工具注册（registry.py）为一体。对外契约（供 definitions / main 装配）：
+
+- `build_tools(defs_dir)` → 把目录下的 YAML 工具定义构建为 `StructuredTool` 列表
+- `register_all_databases()` / `close_databases()` → 平台生命周期：加载 `resources/databases.yaml`、释放连接池
+
+注意：`app.core.database`（oracle.py）是纯驱动（连接池/协议，无工具与 Agent 概念），
+本包是能力层——两层同名不同层，import 时勿混。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from app.harness.tools.database.backend import close_databases, register_all_databases
+from app.harness.tools.database.defs import ToolDef, load_tool_defs
+from app.harness.tools.database.registry import make_agent_tool
+
+
+def build_tools(defs_dir: Path) -> list:
+    """把指定目录的 YAML 工具定义构建为 Agent 可调用的 StructuredTool 列表。"""
+    defs = load_tool_defs(defs_dir)
+    return [make_agent_tool(d) for d in defs]
+
+
+__all__ = [
+    # 对外契约
+    "build_tools",
+    "register_all_databases",
+    "close_databases",
+    # 定义模型
+    "ToolDef",
+    "load_tool_defs",
+    # 注册
+    "make_agent_tool",
+]

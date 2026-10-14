@@ -1,0 +1,32 @@
+"""跨 Agent 共享工具层：definitions/_shared（平台内部共享，非独立业务 Agent 包）。
+
+每个共享工具只在 tools/<能力包名>_defs/*.yaml 维护一份定义，多个 Agent 按名引用；
+与业务 Agent 一致，数据库声明归 database 能力包执行、外部接口声明归 http 能力包执行。
+本层只提供按名挑选（显式清单，不 * 全量展开），未命中在装配期点到名字报错。
+承载规则见 app/definitions/__init__.py。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from app.harness.tools.database import build_tools
+from app.harness.tools.http import build_tools as build_http_tools
+
+# 共享工具声明目录：tools/<能力包名>_defs/，与业务 Agent 的 tools/ 下约定同构
+_DATABASE_DEFS_DIR = Path(__file__).resolve().parent / "tools" / "database_defs"
+_HTTP_DEFS_DIR = Path(__file__).resolve().parent / "tools" / "http_defs"
+
+
+def get_shared_tools(names: list[str]) -> list:
+    """按名称从共享目录挑选工具；未命中则点名报错（防清单手误 / 改名不同步）。"""
+    pool = {
+        t.name: t
+        for t in [*build_tools(_DATABASE_DEFS_DIR), *build_http_tools(_HTTP_DEFS_DIR)]
+    }
+    missing = [n for n in names if n not in pool]
+    if missing:
+        raise ValueError(f"共享工具引用未命中：{missing}")
+    return [pool[n] for n in names]
+
+
+__all__ = ["get_shared_tools"]

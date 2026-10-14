@@ -1,0 +1,36 @@
+"""设备数据查询与知识问答智能体定义。
+
+框架先行：仅落地基于 MBSEQUIPMENT 的两个工具（query_device_list / query_device_profile），
+其余业务查询（维保/采购/告警/点检等）后续以数据库能力包声明（tools/database_defs/*.yaml）
+增量补充，不修改本模块。提示词从 resources/prompts/ 按名读取，不在此硬编码。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from langchain.agents import create_agent
+
+from app.harness.llm import get_model
+from app.harness.prompts import prompt_registry
+from app.harness.registry import agent_registry
+from app.harness.tools.database import build_tools
+
+# 数据库能力包声明目录：tools/<能力包名>_defs/，与 agent.py 同级的 tools/ 下
+_DATABASE_DEFS_DIR = Path(__file__).resolve().parent / "tools" / "database_defs"
+
+
+def register() -> None:
+    """装配设备助手：加载工具定义并注册 Agent。
+
+    数据库目录由平台层（app/main.py）统一加载，本模块不负责。
+    数据驱动工具经 tools/database_defs/*.yaml 声明，引用目录中的 db 标识
+    （见 database_defs/device.yaml 的 db 字段），由 harness/tools/database 能力包执行。
+    提示词经 resources/prompts/ 声明，按 Agent 名读取。
+    模型构造失败（如缺密钥）时跳过注册，不阻塞应用启动。
+    """
+    agent = create_agent(
+        model=get_model("deepseek"),
+        tools=build_tools(_DATABASE_DEFS_DIR),
+        system_prompt=prompt_registry.get("mes_device_assistant"),
+    )
+    agent_registry.register("mes_device_assistant", agent)

@@ -1,0 +1,46 @@
+"""Agent 提示词 spec 数据模型与加载（通用，业务无关）。
+
+提示词目录描述"每个 Agent 的 instructions 是什么"，与 MCP 目录（harness/mcp/specs.py）
+同构：YAML → pydantic 校验 → 注册表，应用启动时装配。通用层不感知任何具体 Agent 业务。
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel
+
+from app.core.config.settings import PROJECT_ROOT
+
+# 平台 Agent 提示词目录默认路径（可用环境变量 AGENT_PROMPTS_PATH 覆盖）
+DEFAULT_AGENT_PROMPTS_PATH = PROJECT_ROOT / "resources" / "prompts"
+
+
+class AgentPromptSpec(BaseModel):
+    """一个 Agent 的提示词声明（name → instructions）。"""
+
+    name: str
+    instructions: str
+
+    # 忽略未声明字段：为未来扩展（model 选型、variables 占位符）留口子，不破坏既有文件
+    model_config = {"extra": "ignore"}
+
+
+def load_agent_prompts(path: Path | str | None = None) -> list[AgentPromptSpec]:
+    """从提示词目录加载全部 Agent 提示词；目录缺失或为空时返回空列表。
+
+    目录结构：每个 Agent 一个 YAML 文件（文件名不限，以 spec 的 name 字段为准），
+    文件为单一 spec：`name`（Agent 名）+ `instructions`（完整系统提示词）。
+    按文件名排序加载，保证注册顺序稳定。
+    """
+    resolved = Path(path or os.environ.get("AGENT_PROMPTS_PATH") or DEFAULT_AGENT_PROMPTS_PATH)
+    if not resolved.exists():
+        return []
+    # 兼容 AGENT_PROMPTS_PATH 指向单个 spec 文件；默认指向 prompts/ 目录
+    files = sorted(resolved.glob("*.yaml")) if resolved.is_dir() else [resolved]
+    specs: list[AgentPromptSpec] = []
+    for file in files:
+        data = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
+        specs.append(AgentPromptSpec.model_validate(data))
+    return specs

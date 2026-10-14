@@ -1,0 +1,22 @@
+"""codelist 能力包：代码表翻译这一项完整、自治的能力。
+
+整合定义（specs.py）、数据库加载（executor.py）、注册与翻译（registry.py）为一体。
+对外契约（供 main 装配、database 能力包 format_result 引用）：
+
+- `register_all_codelists()` → 装配：从 resources/codelists.yaml 声明式登记（不触发连接）
+- `codelist_registry` → 模块级注册表单例，供工具引擎按 (db, code_ref) 翻译编码列
+
+注意：`app.core.database`（oracle.py）是纯驱动；本包与 `database`（查询工具引擎）同级，
+只做代码表翻译，不感知具体业务——领域差异全收在 resources/codelists.yaml。
+"""
+from __future__ import annotations
+
+from app.harness.tools.codelist.registry import CodelistRegistry, codelist_registry, register_all_codelists
+
+__all__ = [
+    # 对外契约
+    "register_all_codelists",
+    "codelist_registry",
+    # 注册表
+    "CodelistRegistry",
+]

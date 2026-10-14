@@ -1,0 +1,9 @@
+"""箱贴打标数据校验业务包：mes_process_markdata_compare Agent 定义与箱贴打标域工具定义。
+
+对外只暴露 register() 供应用入口装配；实现见 agent.py，
+数据驱动工具见 tools/database_defs/，订单评审基准共享工具按名引自 app/definitions/_shared。
+承载规则见 app/definitions/__init__.py。
+"""
+from app.definitions.mes_process_markdata_compare.agent import register
+
+__all__ = ["register"]

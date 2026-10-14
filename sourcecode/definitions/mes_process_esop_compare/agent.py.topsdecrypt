@@ -1,0 +1,40 @@
+"""ESOP 工艺数据校验智能体定义。
+
+数据驱动：场景数据库查询走 tools/database_defs/*.yaml（database 能力包），
+订单评审基准工具（query_moline / dsp_OrtViewInfo / crm_OrtViewList）为跨 Agent 共享，
+按名引自 app/definitions/_shared（共享目录只维护一份 YAML）。
+提示词从 resources/prompts/mes_process_esop_compare.yaml 按名读取，不在此硬编码。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from langchain.agents import create_agent
+
+from app.definitions._shared import get_shared_tools
+from app.harness.llm import get_model
+from app.harness.prompts import prompt_registry
+from app.harness.registry import agent_registry
+from app.harness.tools.database import build_tools
+
+# 场景专属工具声明目录：tools/<能力包名>_defs/，与 agent.py 同级的 tools/ 下
+_DATABASE_DEFS_DIR = Path(__file__).resolve().parent / "tools" / "database_defs"
+
+# 共享工具按名引用清单（订单评审基准链路：query_moline → dsp_OrtViewInfo + crm_OrtViewList），
+# 只挑本场景用到的共享工具；需新增共享工具引用时在此追加一项即可。
+_SHARED_TOOL_NAMES = ["query_moline", "dsp_OrtViewInfo", "crm_OrtViewList"]
+
+
+def register() -> None:
+    """装配 ESOP 工艺数据校验：加载工具定义并注册 Agent。
+
+    工具 = 场景专属（本包 tools/*_defs/）+ 共享（definitions/_shared 按名引用）；
+    提示词经 resources/prompts/ 声明，按 Agent 名读取。
+    模型构造失败（如缺密钥）时跳过注册，不阻塞应用启动。
+    """
+    agent = create_agent(
+        model=get_model("deepseek"),
+        tools=[*build_tools(_DATABASE_DEFS_DIR), *get_shared_tools(_SHARED_TOOL_NAMES)],
+        system_prompt=prompt_registry.get("mes_process_esop_compare"),
+    )
+    agent_registry.register("mes_process_esop_compare", agent)

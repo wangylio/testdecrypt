@@ -1,0 +1,6 @@
+"""harness：Agent 平台机制层（业务无关）——跑 Agent 的机制。
+
+包含 LLM 通道（llm/）、执行编排（runtime/）、会话持久化（session/）、Agent 注册表机制（registry.py）、
+数据驱动工具引擎（tools/engine/）、平台自有通用工具（tools/）等业务无关代码。
+仅可依赖 core；禁止依赖 definitions（业务层）与 api（交付层）。
+"""

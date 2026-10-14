@@ -1,0 +1,45 @@
+# 工艺助手外部接口工具：ERP 物料清单（BOM）展开明细查询（只读）。
+#
+# body 模板声明整段请求体：固定字段（interfaceCode/system/orgCode）原样下发，
+# {param} 占位符由引擎替换为参数值（参数在 params 声明，可选参数缺省渲染为空串）。
+# 响应以 success=true 判定业务成功，数据列表在 result 字段。
+- name: iss_queryERPBomOpen
+  description: 按 BOM 编码与 BOM 日期查询 ERP 物料清单（BOM）展开明细（只读查询接口）。用于回答“查 BOM / 查某产品物料的组成清单 / 查物料清单”等工艺配料相关问题。
+  endpoint: iss-service
+  method: POST
+  path: /iss/interface/request
+  body:
+    interfaceCode: queryERPBomOpen
+    paramsMap:
+      system: MES
+      orgCode: D1
+      bomCode: "{bomCode}"
+      project: "{project}"
+      bomDate: "{bomDate}"
+  params:
+    - name: bomCode
+      type: string
+      description: BOM 编码（精确匹配，必填）
+      required: true
+      location: body
+    - name: bomDate
+      type: date
+      description: BOM 日期（YYYY-MM-DD 或相对表达式 last_1d/1w/1m/1y，可选）
+      location: body
+    - name: project
+      type: string
+      description: 项目编码（可选，缺省为空）
+      location: body
+  result_path: result
+  success_field: success
+  success_value: true
+  columns:
+    - "itemMasterCode: 物料编码"
+    - "itemMasterName: 物料名称"
+    - "qty: 数量"
+    - "usageQty: 用量"
+    - "parentQty: 父项数量"
+    - "supplyWareHouse: 出库仓库"
+    - "issueUOM: 单位"
+    - "reMark: 备注"
+  limit: 100

@@ -1,0 +1,45 @@
+# 设备维修手册域工具定义（declarative，基于 MESEQUIPREPAIRMANUAL，2026-08-19 新增）
+#
+# 维修手册为知识类查询：用户提问设备如何维修 / 故障原因 / 解决措施等知识问题时，
+# 凭设备编号直达。本表与设备档案的关联键是【设备型号 EQUIPMODEL】（而非内部主键 id），
+# 故 root_ref 将 root_id_column 声明为根表 MBSEQUIPMENT 的 EQUIPMODEL，实现按型号关联。
+# 表名须带 BASIC. 前缀（只读账号访问）。
+
+- name: query_device_repair_manual
+  description: 按设备编号查询该设备的维修手册知识（故障编码、故障现象、原因分析、解决措施等），返回最多 50 条。用于回答"设备如何维修 / 某故障原因 / 怎么解决"等知识问题。需先经 query_device_list/query_device_profile 取得设备编号后调用。
+  mode: declarative
+  db: mes
+  table: BASIC.MESEQUIPREPAIRMANUAL
+  output_columns:
+    - "ID: 主键"
+    - "EQUIPNAME: 设备名称"
+    - "EQUIPMODEL: 设备型号"
+    - "EXCEPTIONCODE: 故障编码"
+    - "APPEARANCE: 故障现象"
+    - "REASON: 原因分析"
+    - "SOLUTION: 解决措施"
+    - "DESCRIPTION: 备注"
+    - "SORTCODE: 排序号"
+    - "ENABLED: 是否有效"
+  translate_columns:
+    ENABLED: CboItems.CboYesNo
+    CREATEUSER: CboUser
+    MODIFIEDUSER: CboUser
+  order_by: SORTCODE
+  limit: 50
+  default_filters:
+    - column: ENABLED
+      op: eq
+      value: 1
+  root_ref:
+    root_table: BASIC.MBSEQUIPMENT
+    root_key_column: CODE
+    root_id_column: EQUIPMODEL
+    join_column: EQUIPMODEL
+  filters:
+    - param: device_code
+      type: string
+      description: 设备编号
+      column: CODE
+      op: eq
+      required: true

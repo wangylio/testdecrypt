@@ -1,0 +1,15 @@
+"""平台内建工具能力包集合。
+
+约定：一个子包 = 一项完整、自治的能力（数据库查询、天气查询、相似度计算……）。
+每个能力包在各自 `__init__.py` 提供统一出口：
+  build_tools(defs_dir) → StructuredTool 列表        # 供 definitions/<agent> 装配
+  register_all_<资源>()                            # 应用启动装配（只读配置）
+  close_<资源>()                                   # 应用退出释放资源
+能力包之间互不依赖、可独立演进；新增能力 = 新增子包，零改动既有包。
+入口命名与平台其他装配对齐：register 统一 register_all_<资源>
+（register_all_agents / register_all_agent_prompts / register_all_databases），
+close 沿用 close_<资源>（close_databases）。
+
+当前能力包：
+  database/  数据库查询（data-driven declarative/template 工具，依赖 core/database 驱动）
+"""

@@ -1,0 +1,65 @@
+"""http 能力包的后端：把 core/http/client 驱动暴露为平台能力。
+
+模块级注册表 {endpoint_id: HttpClient}，惰性建客户端（首次请求才连，认证机密经
+os.environ 读取）；async 门面供本能力包 executor（请求组装/调用）使用。本模块
+只认 endpoint_id，对具体外部系统（哪个端点、什么认证）无感知——领域差异全部
+收在 resources/endpoints.yaml 与 definitions/<agent>/tools/http_defs/*.yaml。
+"""
+from __future__ import annotations
+
+from app.core.logging import get_logger
+from app.core.http.client import EndpointSpec, HttpError, HttpClient, load_specs
+
+logger = get_logger(__name__)
+
+_SPECS: dict[str, EndpointSpec] = {}
+_CLIENTS: dict[str, HttpClient] = {}
+
+
+def register_all_endpoints() -> None:
+    """从 resources/endpoints.yaml 加载端点目录并登记（只读配置，不触发请求）。"""
+    _SPECS.clear()
+    _SPECS.update(load_specs())
+    logger.info("端点目录装配", endpoints=sorted(_SPECS))
+
+
+async def get(ep_id: str) -> HttpClient:
+    """按 ep_id 取客户端（首次惰建）。未注册或凭据缺失时报可读错误。"""
+    if ep_id not in _SPECS:
+        raise HttpError(f"未注册的端点 id：{ep_id}")
+    client = _CLIENTS.get(ep_id)
+    if client is None:
+        client = HttpClient(_SPECS[ep_id])
+        _CLIENTS[ep_id] = client
+    return client
+
+
+async def request(
+    ep_id: str,
+    method: str,
+    path: str,
+    query: dict[str, object] | None = None,
+    body: dict[str, object] | None = None,
+    headers: dict[str, str] | None = None,
+) -> dict:
+    """对 ep_id 对应外部系统发起请求（httpx 原生 async，无需 asyncio.to_thread）。"""
+    client = await get(ep_id)
+    return await client.request(method, path, query=query, body=body, headers=headers)
+
+
+def get_base_url(ep_id: str) -> str:
+    """返回 ep_id 的 base_url（审计完整 URL 用）。未注册报可读错误。"""
+    if ep_id not in _SPECS:
+        raise HttpError(f"未注册的端点 id：{ep_id}")
+    return _SPECS[ep_id].base_url
+
+
+async def close_endpoints() -> None:
+    """释放全部 HTTP 客户端（应用退出时调用）。单个关闭异常不阻塞其余。"""
+    for ep_id, client in _CLIENTS.items():
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001 - 关闭异常只记录，不阻断整体退出
+            logger.warning("HTTP 客户端关闭异常", endpoint=ep_id, exc_info=True)
+    _CLIENTS.clear()
+    logger.info("HTTP 客户端已释放", released=len(_SPECS))

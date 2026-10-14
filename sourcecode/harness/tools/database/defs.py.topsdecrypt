@@ -1,0 +1,185 @@
+"""数据驱动工具定义模型与加载：领域查询工具以声明数据（YAML）承载。
+
+declarative（声明式）：表 + filters + output_columns，引擎自动生成 SELECT；
+template（SQL 模板）：用户提供含 :param 绑定的 SQL，引擎按绑定变量执行。
+业务差异全部收在定义中，引擎与 Agent 代码对业务无感知。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel, Field, model_validator
+
+_TypeName = Literal["string", "number", "integer", "boolean", "date"]
+_OpName = Literal["eq", "like", "ge", "le"]
+
+
+class FilterSpec(BaseModel):
+    """declarative 模式的过滤声明：工具入参 → 数据库列。"""
+
+    param: str
+    type: _TypeName = "string"
+    description: str = ""
+    column: str
+    op: _OpName = "eq"
+    required: bool = False
+
+
+class ParamSpec(BaseModel):
+    """template 模式的具名参数声明。"""
+
+    name: str
+    type: _TypeName = "string"
+    description: str = ""
+    required: bool = False
+    default: str | None = None
+
+
+class DefaultFilter(BaseModel):
+    """declarative 的常量过滤声明：无入参的固定条件（如 ENABLED = 1）。
+
+    与入参无关，调用方未传任何参数也无条件拼入 WHERE。「默认只看有效数据」等恒定语义。
+    """
+
+    column: str
+    value: str | int | float | bool
+    op: _OpName = "eq"
+
+
+class RootRef(BaseModel):
+    """declarative 的业务键跨表解析声明：把业务键值换算为根表主键后过滤本表。
+
+    纯关系抽象，引擎不认知具体业务——只是"本表 join_column = 根表按 root_key_column
+    定位到的 root_id_column"。子表/孙表大都直接冗余根表 id，故 root_table 一律指向根表，
+    2/3 级共用同一机制，无递归。
+    """
+
+    root_table: str  # 根表（如 MBSEQUIPMENT）
+    root_key_column: str  # 用户传入的业务键列（如 CODE）
+    root_id_column: str  # 根表主键列（如 ID）
+    join_column: str  # 本表关联根表 id 的列（如 EQUIPID）
+
+
+class ToolDef(BaseModel):
+    """一个数据驱动领域工具的定义。"""
+
+    name: str
+    description: str
+    mode: Literal["declarative", "template"] = "declarative"
+    db: str  # 使用的数据库 id（见 resources/databases.yaml）
+    # declarative 字段
+    table: str | None = None
+    filters: list[FilterSpec] = Field(default_factory=list)
+    time_field: str | None = None
+    output_columns: list[str] = Field(default_factory=list)
+    order_by: str | None = None
+    root_ref: RootRef | None = None  # 业务键跨表解析（未声明则 None，向后兼容）
+    default_filters: list[DefaultFilter] = Field(default_factory=list)
+    column_labels: dict[str, str] = Field(default_factory=dict)  # 列名→中文名（由 output_columns 解析）
+    # template 字段
+    sql: str | None = None
+    params: list[ParamSpec] = Field(default_factory=list)
+    # 公共
+    limit: int = 100
+    # 编码列翻译：列名(declarative=裸列名 / template=SQL别名)→编码引用标识(见 resources/codelists.yaml)
+    translate_columns: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_mode_fields(self) -> "ToolDef":
+        if self.mode == "declarative":
+            if not self.table:
+                raise ValueError(f"工具 '{self.name}': declarative 模式必须指定 table")
+            if not self.output_columns:
+                raise ValueError(f"工具 '{self.name}': declarative 模式必须指定 output_columns")
+        else:
+            if not self.sql:
+                raise ValueError(f"工具 '{self.name}': template 模式必须指定 sql")
+        self._check_root_ref()
+        self._check_default_filters()
+        self._parse_output_columns()
+        return self
+
+    def _parse_output_columns(self) -> None:
+        """解析 output_columns 的内联中文名声明（`CODE: 设备编号` 形式）。
+
+        元素可为裸列名（`CODE`，中文名回退为列名本身）或带中文名（`CODE: 设备编号`）。
+        引擎处理 SQL 一律用裸列名；展示（format_result 表头）用中文名。
+        """
+        self.column_labels = {}
+        for col in self.output_columns:
+            name, sep, label = col.partition(":")
+            if sep and label.strip():
+                self.column_labels[name.strip()] = label.strip()
+
+    @property
+    def select_columns(self) -> list[str]:
+        """供 SQL 使用的裸列名列表（去掉内联中文名部分）。"""
+        return [
+            col.partition(":")[0].strip()
+            for col in self.output_columns
+        ]
+
+    @property
+    def column_headers(self) -> list[str]:
+        """供展示用的表头（有中文名用中文名，否则回退裸列名）。"""
+        return [self.column_labels.get(col, col) for col in self.select_columns]
+
+    @property
+    def column_code_refs(self) -> dict[str, str]:
+        """需翻译的列 → 编码引用标识（translate_columns 原样，供 format_result 翻译用）。
+
+        declarative：键为裸列名；template：键为 SQL 别名（写在 SELECT 的 `AS 别名`）。
+        未标注的列不在其中（保持原样输出编码）。
+        """
+        return dict(self.translate_columns)
+
+    def _check_root_ref(self) -> None:
+        """root_ref 声明校验：业务键 filter 须以 root_key_column 承载业务键值。"""
+        if self.mode != "declarative" or not self.root_ref:
+            return
+        rr = self.root_ref
+        # 业务键 filter：column 应指向根表业务键列（root_key_column），
+        # 引擎据此把用户传入的业务键值换算为根表主键后过滤本表。
+        key_columns = [f.column for f in self.filters]
+        if rr.root_key_column not in key_columns:
+            raise ValueError(
+                f"工具 '{self.name}': 声明 root_ref.root_key_column='{rr.root_key_column}' 时，"
+                f"须存在 column 为该列的业务键 filter（现有 filter columns：{key_columns or '无'}）"
+            )
+        # join_column 是根表主键的承载，不应与 filters 里出现的列混同（属子查询内部，非直接列）
+        for f in self.filters:
+            if f.column == rr.join_column:
+                raise ValueError(
+                    f"工具 '{self.name}': filter column '{f.column}' 与 root_ref.join_column 重复，"
+                    f"关联列应交给 root_ref 处理，不应再作为本表直接过滤"
+                )
+
+    def _check_default_filters(self) -> None:
+        """default_filters 声明校验：仅 declarative，且不与 filters/root_ref 的列冲突。"""
+        if self.mode != "declarative":
+            if self.default_filters:
+                raise ValueError(f"工具 '{self.name}': default_filters 仅在 declarative 模式下可用")
+            return
+        direct = {f.column for f in self.filters}
+        for df in self.default_filters:
+            if df.column in direct:
+                raise ValueError(
+                    f"工具 '{self.name}': default_filters 列 '{df.column}' 与 filters 入参列冲突，"
+                    f"常量条件不应与用户可传入的过滤列重名"
+                )
+
+
+def load_tool_defs(directory: Path) -> list[ToolDef]:
+    """加载目录下全部 *.yaml 工具定义（按文件名排序）。"""
+    defs: list[ToolDef] = []
+    for path in sorted(directory.glob("*.yaml")):
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not data:
+            continue
+        if not isinstance(data, list):
+            raise ValueError(f"工具定义文件 {path} 须为 YAML 列表")
+        for item in data:
+            defs.append(ToolDef.model_validate(item))
+    return defs

@@ -1,0 +1,25 @@
+# 工艺数据比对域工具定义（2026-08-25 新增）
+#
+# 跨表关联查询：按生产工单号（moline 单号，如 D1MO260812008-001）查询关联
+# ESOP 工艺文件的页条目明细。链式关联：MESESOPFILEPAGEITEM → 页 → 文件 → 文件申请，
+# 文件申请按 molinedocno 匹配生产工单号。select pi.* 输出页条目全列（表头即原始列名）。
+# 表名加 BASIC. 前缀（只读账号直连约定，与 moline.yaml 一致）。
+# 入参一律绑定变量（:moline_docno），值不进入 SQL 文本。
+
+- name: query_esop_page_items
+  description: 按生产工单号（moline 单号，如 D1MO260812008-001）查询关联 ESOP 工艺文件的页条目明细（MESESOPFILEPAGEITEM，经 ESOP 文件页/文件/文件申请关联）。用于回答"某工单的 ESOP / 工艺文件 / 作业指导书页条目内容"等问题。
+  mode: template
+  db: mes
+  sql: |
+    SELECT pi.itemname, pi.itemcode, pi.itemvalue
+    FROM BASIC.MESESOPFILEPAGEITEM pi
+    LEFT JOIN BASIC.MESESOPFILEPAGE p ON p.id = pi.esopfilepageid
+    LEFT JOIN BASIC.MESESOPFILE f ON f.id = p.esopfileid
+    LEFT JOIN BASIC.MESESOPFILEAPPLY a ON a.id = f.applyid
+    WHERE a.molinedocno = :moline_docno
+  params:
+    - name: moline_docno
+      type: string
+      description: 生产工单号（moline 单号，必填，如 D1MO260812008-001）
+      required: true
+  limit: 200

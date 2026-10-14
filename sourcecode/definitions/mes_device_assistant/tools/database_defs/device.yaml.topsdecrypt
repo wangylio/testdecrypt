@@ -1,0 +1,261 @@
+# 设备域工具定义（declarative，基于 MBSEQUIPMENT，列结构 2026-08-12 已盘点）
+# 其余业务查询（维修/告警/点检保养/采购）后续按需增量补充定义，不改引擎与 Agent 代码
+
+- name: query_device_list
+  description: 按设备编号或名称查找设备，返回候选列表（最多 20 条）。设备编号优先精确匹配；未命中时按名称模糊匹配。用于在进入详细信息查询前解析设备身份。
+  mode: declarative
+  db: mes
+  table: BASIC.MBSEQUIPMENT
+  output_columns:
+    - "CODE: 设备编号"
+    - "NAME: 设备名称"
+    - "EQUIPMODEL: 型号"
+    - "FACTORYID: 工厂"
+    - "LINENO: 线体"
+  translate_columns:
+    FACTORYID: MbsFactory
+    LINENO: MbsLine
+  order_by: CODE ASC
+  limit: 20
+  default_filters:
+    - column: ENABLED
+      op: eq
+      value: 1
+  filters:
+    - param: device_code
+      type: string
+      description: 设备编号（精确匹配）
+      column: CODE
+      op: eq
+    - param: device_name
+      type: string
+      description: 设备名称（模糊匹配）
+      column: NAME
+      op: like
+
+- name: query_device_profile
+  description: 查询指定设备的基础档案信息（编号、名称、大类、型号、产线、用途、区域、状态、是否关键设备、工厂、验收状态、投产日期等全部档案列）。需先经 query_device_list 取得唯一设备编号后调用。
+  mode: declarative
+  db: mes
+  table: BASIC.MBSEQUIPMENT
+  output_columns:
+    - "ID: 主键"
+    - "CODE: 设备编号"
+    - "NAME: 设备名称"
+    - "TYPE: 大类"
+    - "KIND: 中类"
+    - "FACTORYID: 工厂"
+    - "LINENO: 线体"
+    - "EQUIPMODEL: 型号"
+    - "EQUIPAREAID: 区域"
+    - "EQUIPUSAGE: 用途"
+    - "ISAVAILABLE: 设备状态"
+    - "ISKEYDEVICE: 是否关键设备"
+    - "ACCEPTANCESTATUS: 验收状态"
+    - "SORTCODE: 排序号"
+    - "ENABLED: 是否启用"
+    - "CREATEORGID: 创建组织"
+    - "CREATEON: 创建时间"
+    - "CREATEUSER: 创建人"
+    - "MODIFIEDON: 修改时间"
+    - "MODIFIEDUSER: 修改人"
+    - "DESCRIPTION: 描述"
+  translate_columns:
+    TYPE: CboItems.MbsEquipmentType
+    FACTORYID: MbsFactory
+    LINENO: MbsLine
+    ISAVAILABLE: CboItems.MbsEquipmentIsavailable
+    KIND: CboItems.MbsEquipmentKind
+    ISKEYDEVICE: CboItems.CboYesNo
+    EQUIPAREAID: MbsEquipArea
+    ACCEPTANCESTATUS: CboItems.MbsEquipmentAcceptanceStatus
+    ENABLED: CboItems.CboYesNo
+    CREATEORGID: CboOrg
+    CREATEUSER: CboUser
+    MODIFIEDUSER: CboUser
+  order_by: CODE ASC
+  limit: 1
+  default_filters:
+    - column: ENABLED
+      op: eq
+      value: 1
+  filters:
+    - param: device_code
+      type: string
+      description: 设备编号
+      column: CODE
+      op: eq
+      required: true
+      
+
+- name: query_device_purchase
+  description: 按设备编号查询该设备的采购信息（采购方式、供应商、出厂编码/时间等），返回最多 20 条。需先经 query_device_list/query_device_profile 取得设备编号后调用。
+  mode: declarative
+  db: mes
+  table: BASIC.MBSEQUIPPURCHASE
+  output_columns:
+    - "ID: 主键"
+    - "EQUIPID: 设备ID"
+    - "PURCHASEWAY: 采购方式"
+    - "SUPPLIERID: 供应商"
+    - "SUPPLIERNATURE: 供应商性质"
+    - "SRMASNDOCNO: SRM送货单"
+    - "OUTFACTORYNO: 出厂编码"
+    - "OUTFACTORYTIME: 出厂时间"
+    - "DESCRIPTION: 描述"
+    - "SORTCODE: 排序号"
+    - "ENABLED: 是否启用"
+    - "CREATEON: 创建时间"
+    - "MODIFIEDON: 修改时间"
+  translate_columns:
+    PURCHASEWAY: CboItems.MbsEquipPurchaseWay
+    SUPPLIERID: MbsSupplier
+    SUPPLIERNATURE: CboItems.MbsEquipmentIsavailable
+    ENABLED: CboItems.CboYesNo
+    CREATEUSER: CboUser
+    MODIFIEDUSER: CboUser
+  order_by: EQUIPID, SORTCODE
+  limit: 20
+  default_filters:
+    - column: ENABLED
+      op: eq
+      value: 1
+  root_ref:
+    root_table: BASIC.MBSEQUIPMENT
+    root_key_column: CODE
+    root_id_column: ID
+    join_column: EQUIPID
+  filters:
+    - param: device_code
+      type: string
+      description: 设备编号
+      column: CODE
+      op: eq
+      required: true
+
+- name: query_device_sparepart
+  description: 按设备编号查询该设备的关联备件清单（料号、名称、标准/预警/实际寿命次数等），返回最多 50 条。需先经 query_device_list/query_device_profile 取得设备编号后调用。
+  mode: declarative
+  db: mes
+  table: BASIC.MBSEQUIPSPAREPART
+  output_columns:
+    - "ID: 主键"
+    - "EQUIPID: 设备ID"
+    - "ITEMCODE: 物料料号"
+    - "ITEMNAME: 物料名称"
+    - "USAGETIMESRATIO: 使用次数比例"
+    - "STANDARDTIMES: 标准寿命次数"
+    - "ALERTTIMES: 预警寿命次数"
+    - "USAGETIMES: 实际使用次数"
+    - "DESCRIPTION: 描述"
+    - "SORTCODE: 排序号"
+    - "ENABLED: 是否启用"
+    - "CREATEON: 创建时间"
+    - "MODIFIEDON: 修改时间"
+  translate_columns:
+    ENABLED: CboItems.CboYesNo
+    CREATEUSER: CboUser
+    MODIFIEDUSER: CboUser
+  order_by: EQUIPID, SORTCODE
+  limit: 50
+  default_filters:
+    - column: ENABLED
+      op: eq
+      value: 1
+  root_ref:
+    root_table: BASIC.MBSEQUIPMENT
+    root_key_column: CODE
+    root_id_column: ID
+    join_column: EQUIPID
+  filters:
+    - param: device_code
+      type: string
+      description: 设备编号
+      column: CODE
+      op: eq
+      required: true
+
+- name: query_device_proc_capacity
+  description: 按设备编号查询该设备的加工能力/参数（编码、名称、数值、上下限、单位等），返回最多 50 条。需先经 query_device_list/query_device_profile 取得设备编号后调用。
+  mode: declarative
+  db: mes
+  table: BASIC.MBSEQUIPMENTPROCESSCAPACITY
+  output_columns:
+    - "ID: 主键"
+    - "EQUIPMENTID: 设备ID"
+    - "CODE: 编码"
+    - "NAME: 名称"
+    - "TYPE: 类型"
+    - "RELATIONSHIP: 关系"
+    - "DATAVALUE: 数值"
+    - "LOWERLIMITVALUE: 下限值"
+    - "UPPERLIMITVALUE: 上限值"
+    - "UNIT: 单位"
+    - "DESCRIPTION: 描述"
+    - "SORTCODE: 排序号"
+    - "ENABLED: 是否启用"
+    - "CREATEON: 创建时间"
+    - "MODIFIEDON: 修改时间"
+  translate_columns:
+    CODE: CboItems.MbsEquipmentProcessCapacity
+    TYPE: CboItems.MbsEquipmentProcessCapacityType
+    RELATIONSHIP: CboItems.MbsEquipmentProcessCapacityRelationship
+    UNIT: CboItems.MbsEquipmentProcessCapacityUnit
+    ENABLED: CboItems.CboYesNo
+  order_by: EQUIPMENTID, SORTCODE
+  limit: 50
+  default_filters:
+    - column: ENABLED
+      op: eq
+      value: 1
+  root_ref:
+    root_table: BASIC.MBSEQUIPMENT
+    root_key_column: CODE
+    root_id_column: ID
+    join_column: EQUIPMENTID
+  filters:
+    - param: device_code
+      type: string
+      description: 设备编号
+      column: CODE
+      op: eq
+      required: true
+
+- name: query_device_specification
+  description: 按设备编号查询该设备的单行规格参数（额定能耗、氮气量、压缩空气等）。需先经 query_device_list/query_device_profile 取得设备编号后调用。
+  mode: declarative
+  db: mes
+  table: BASIC.MBSEQUIPSPECIFICATION
+  output_columns:
+    - "ID: 主键"
+    - "EQUIPID: 设备ID"
+    - "RATEDENERGYCONSUMPTION: 额定能耗"
+    - "NITROGENAMOUNT: 氮气量"
+    - "COMPRESSEDAIR: 压缩空气"
+    - "DESCRIPTION: 描述"
+    - "SORTCODE: 排序号"
+    - "ENABLED: 是否启用"
+    - "CREATEON: 创建时间"
+    - "MODIFIEDON: 修改时间"
+  translate_columns:
+    ENABLED: CboItems.CboYesNo
+    CREATEUSER: CboUser
+    MODIFIEDUSER: CboUser
+  order_by: EQUIPID, SORTCODE
+  limit: 1
+  default_filters:
+    - column: ENABLED
+      op: eq
+      value: 1
+  root_ref:
+    root_table: BASIC.MBSEQUIPMENT
+    root_key_column: CODE
+    root_id_column: ID
+    join_column: EQUIPID
+  filters:
+    - param: device_code
+      type: string
+      description: 设备编号
+      column: CODE
+      op: eq
+      required: true

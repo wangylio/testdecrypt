@@ -1,0 +1,8 @@
+"""回显 Agent 业务包：echo Agent 定义及其领域工具。
+
+对外只暴露 register() 供应用入口装配；实现见 agent.py，代码工具见 tools/，
+数据驱动工具（如有）见 tools/<能力包名>_defs/。承载规则见 app/definitions/__init__.py。
+"""
+from app.definitions.echo.agent import register
+
+__all__ = ["register"]

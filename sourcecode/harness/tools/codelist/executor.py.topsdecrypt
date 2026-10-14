@@ -1,0 +1,89 @@
+"""codelist 能力包的加载引擎：从数据库加载代码表映射。
+
+- mode: database —— 执行声明 sql，取 value_column → label_column 两列构建映射。
+- mode: auto     —— 按子类型（items_code_column 的值）+ 主表/明细表 JOIN 查映射。
+
+查询统一走 app.harness.tools.database.backend.run_query（复用连接池与 asyncio 门面），
+本层不直接触碰 core/database 驱动，保持与 database 能力包同层依赖。
+查询失败抛 CodelistLoadError，由注册表层兜底（保持编码原样输出）。
+"""
+
+from __future__ import annotations
+
+from app.core.logging import get_logger
+from app.harness.tools.codelist.specs import AutoCodelistSpec, CodelistSpec
+from app.harness.tools.database.backend import run_query as db_run_query
+
+logger = get_logger(__name__)
+
+
+class CodelistLoadError(Exception):
+    """代码表加载失败（查库失败 / 无法读取结果列）。注册表层兜底为原样输出编码。"""
+
+
+def _to_mapping(parsed: dict, value_column: str, label_column: str) -> dict[str, str]:
+    """把查询行集转成 {编码值(str): 中文名} 映射。缺失列报错点名。"""
+    actual_columns = parsed.get("columns") or []
+    columns_lower = [c.lower() for c in actual_columns]
+    if value_column.lower() not in columns_lower or label_column.lower() not in columns_lower:
+        raise CodelistLoadError(
+            f"代码表 SQL 结果缺少列：需要 '{value_column}' 与 '{label_column}'（实际列：{actual_columns}）"
+        )
+    # 从实际列名建立小写→原名的映射，用于行数据取值（Oracle 返回大写列名 key）
+    col_map = {c.lower(): c for c in actual_columns}
+    vc_real = col_map[value_column.lower()]
+    lc_real = col_map[label_column.lower()]
+    mapping: dict[str, str] = {}
+    for row in parsed.get("rows") or []:
+        value = row.get(vc_real)
+        label = row.get(lc_real)
+        if value is None or label is None:
+            continue
+        mapping[str(value)] = str(label)
+    return mapping
+
+
+async def load_database_spec(spec: CodelistSpec, limit: int) -> dict[str, str]:
+    """mode: database —— 执行声明 sql，加载 {编码值: 中文名}。"""
+    try:
+        parsed = await db_run_query(spec.db, spec.sql, None, limit)
+        mapping = _to_mapping(parsed, spec.value_column, spec.label_column)
+        logger.info("代码表加载", db=spec.db, code_ref=spec.id, rows=len(mapping), mode="database")
+        return mapping
+    except Exception as exc:  # noqa: BLE001 - 加载失败统一转可读错误，由注册表兜底
+        logger.warning("代码表加载失败", db=spec.db, code_ref=spec.id, mode="database", exc_info=True)
+        raise CodelistLoadError(f"代码表 '{spec.id}' 加载失败：{exc}") from exc
+
+
+async def load_auto_spec(spec: AutoCodelistSpec, type_name: str, limit: int) -> dict[str, str]:
+    """mode: auto —— 按子类型名加载 {编码值: 中文名}。
+
+    子类型即 items_table 的 items_code_column 的值（如 CboYesNo）；查询明细表，
+    按 links 主表 id 限定该子类型。缺失列报错点名。
+    """
+    try:
+        # 明细表不直接带主表编码名，需经主表 id 关联：
+        #   SELECT d.<detail_code_column>, d.<detail_name_column>
+        #   FROM <detail_table> d
+        #   JOIN <items_table> i ON i.id = d.<detail_link_column>
+        #   WHERE i.<items_code_column> = :p1
+        sql = (
+            f"SELECT d.{spec.detail_code_column}, d.{spec.detail_name_column} "
+            f"FROM {spec.detail_table} d "
+            f"JOIN {spec.items_table} i ON i.id = d.{spec.detail_link_column} "
+            f"WHERE i.{spec.items_code_column} = :p1"
+        )
+        # 子类型名由注册表传入（来自工具标注的 auto.<type_name>），以绑定变量传，不进 SQL 文本
+        parsed = await db_run_query(spec.db, sql, {"p1": type_name}, limit)
+        mapping = _to_mapping(parsed, spec.detail_code_column, spec.detail_name_column)
+        logger.info(
+            "代码表子类型加载", db=spec.db, code_ref=f"{spec.id}.{type_name}",
+            rows=len(mapping), mode="auto",
+        )
+        return mapping
+    except Exception as exc:  # noqa: BLE001 - 同上，注册表兜底
+        logger.warning(
+            "代码表子类型加载失败", db=spec.db, code_ref=f"{spec.id}.{type_name}",
+            mode="auto", exc_info=True,
+        )
+        raise CodelistLoadError(f"代码表 '{spec.id}.{type_name}' 加载失败：{exc}") from exc

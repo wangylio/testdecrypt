@@ -1,0 +1,8 @@
+"""LLM 模型层：按名管理并选用多通道模型（OpenAI 官方 / DeepSeek）。
+
+镜像 app/harness/prompts/ 的用法：公共入口 get_model 在此重导出，
+Agent 定义层按名取用模型，不触碰 registry 模块细节。
+"""
+from app.harness.llm.registry import get_model
+
+__all__ = ["get_model"]

@@ -1,0 +1,198 @@
+"""数据库能力包的执行引擎：按 ToolDef 生成占位符 SQL 与绑定参数，经 backend 执行。
+
+- declarative：列白名单 + WHERE 组装 + ORDER BY + ROWNUM 限行（目标库无 FETCH FIRST）。
+- template：按 :param 绑定变量执行用户提供的 SQL。
+- 相对时间在引擎层统一换算（resolve_range），模型不计算日期，保证准确度。
+- 参数一律以绑定变量传入（占位符 :pN / :param），值不进入 SQL 文本；列名/表名来自定义白名单，杜绝注入。
+"""
+from __future__ import annotations
+
+import time
+
+from app.core.logging import get_logger
+from app.core.database.oracle import OracleError
+from app.harness.tools._time import ToolInputError, resolve_range
+from app.harness.tools.database.defs import ToolDef
+from app.harness.tools.database.backend import run_query as db_run_query
+
+# 审计记录器：独立 logger 名，由日志装配路由到独立审计文件（logs/audit.log）
+audit_logger = get_logger("app.audit")
+
+# 对话链路记录器：本帧内的工具调用，写入对话通道（logs/conversation.log），
+# 与同请求的 用户提问 / Agent 回复 共享 request_id（经 contextvars 自动带上）
+conversation_logger = get_logger("app.conversation")
+
+#（相对时间换算已上提到 app/harness/tools/_time.py，database 与 http 能力包共享）
+
+# 非 LIKE 过滤操作符 → SQL 比较符号（右值一律为绑定占位符）
+_OP_SQL = {"eq": "=", "ge": ">=", "le": "<="}
+
+
+# ---- SQL 生成（占位符 + 绑定参数）----
+
+
+def _escape_like(value) -> str:
+    """LIKE 值转义：用户输入里的 % / _ 视为字面量，防被当作通配符放大匹配。"""
+    return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def build_select_sql(def_: ToolDef, params: dict) -> tuple[str, dict]:
+    """declarative：生成占位符 SELECT + 绑定参数，ROWNUM 限行。
+
+    支持 root_ref：column 为根表业务键列（root_key_column）的 filter，其 WHERE 改写为
+    `本表关联列 = (SELECT 根表主键列 FROM 根表 WHERE 业务键列 = :bind)` 的子查询，
+    实现"业务键直达子表/孙表"；绑定值复用现有占位符，不进入 SQL 文本。
+    支持 default_filters：无入参常量条件无条件拼入 WHERE，与 root_ref/普通 filters 以 AND 叠加。
+    """
+    where: list[str] = []
+    binds: dict[str, object] = {}
+    rr = def_.root_ref
+    provided = False  # 是否有任一用户入参条件真正生效（防全表扫描判据）
+    for i, f in enumerate(def_.filters):
+        if params.get(f.param) in (None, ""):
+            continue
+        provided = True
+        key = f"p{i}"
+        # root_ref：业务键 filter → 先按业务键定位根表主键，再以本表关联列过滤
+        if rr and f.column == rr.root_key_column:
+            binds[key] = params[f.param]
+            where.append(
+                f"{rr.join_column} = (SELECT {rr.root_id_column} FROM {rr.root_table} "
+                f"WHERE {rr.root_key_column} = :{key})"
+            )
+            continue
+        if f.op == "like":
+            binds[key] = _escape_like(params[f.param])
+            where.append(f"{f.column} LIKE '%' || :{key} || '%' ESCAPE '\\'")
+        else:
+            binds[key] = params[f.param]
+            where.append(f"{f.column} {_OP_SQL.get(f.op, '=')} :{key}")
+
+    if def_.time_field:
+        from_str, to_str = resolve_range(params.get("date_from"), params.get("date_to"))
+        col = def_.time_field
+        if from_str:
+            binds["time_from"] = from_str
+            where.append(f"{col} >= TO_DATE(:time_from, 'YYYY-MM-DD')")
+        if to_str:
+            binds["time_to"] = to_str
+            where.append(f"{col} < TO_DATE(:time_to, 'YYYY-MM-DD') + 1")
+
+    # 无入参常量条件（如 ENABLED = 1）无条件拼入，与其它条件以 AND 叠加
+    for j, df in enumerate(def_.default_filters):
+        key = f"df{j}"
+        binds[key] = df.value
+        if df.op == "like":
+            where.append(f"{df.column} LIKE '%' || :{key} || '%' ESCAPE '\\'")
+        else:
+            where.append(f"{df.column} {_OP_SQL.get(df.op, '=')} :{key}")
+
+    # 声明了入参过滤条件但一个都没给 → 明确提示，避免无意全表扫描
+    # （default_filters 为常量条件，不满足"用户提供了条件"；故判据只看 provided）
+    if def_.filters and not provided:
+        names = "、".join(f.param for f in def_.filters)
+        raise ToolInputError(f"请至少提供一个查询条件（{names}）")
+
+    columns = ", ".join(def_.select_columns)
+    sql = f"SELECT {columns} FROM {def_.table}"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    if def_.order_by:
+        sql += f" ORDER BY {def_.order_by}"
+    limit = def_.limit
+    # Oracle 无 FETCH FIRST，用内层排序 + 外层 ROWNUM 限行
+    return f"SELECT * FROM ({sql}) WHERE ROWNUM <= {limit}", binds
+
+
+def build_template_sql(def_: ToolDef, params: dict) -> tuple[str, dict]:
+    """template：按 :param 组装绑定参数（date 型先做相对时间换算）。"""
+    binds: dict[str, object] = {}
+    for p in def_.params:
+        value = params.get(p.name)
+        if value in (None, ""):
+            if p.required:
+                raise ToolInputError(f"缺少必填参数：{p.name}")
+            value = p.default
+        if p.type == "date" and value is not None:
+            resolved, _ = resolve_range(value, None)
+            value = resolved
+        binds[p.name] = value
+    return def_.sql or "", binds
+
+
+# ---- 执行与结果 ----
+
+
+async def format_result(def_: ToolDef, parsed: dict) -> str:
+    """把解析后的行集组织为给 LLM 的紧凑文本（制表符分隔），并对 translate_columns 标注列翻译。
+
+    - 表头优先用 output_columns 内联声明的中文名（column_labels），无中文名则回退裸列名。
+    - 取值按裸列名（declarative）或 SELECT 别名（template）从行中读取。
+    - 对标注了 translate_columns 的列，浅拷贝行并调 codelist 注册表把编码译为中文
+      （未标注列保持原样；翻译失败由注册表兜底原样输出编码，不中断渲染）。
+
+    注意：codelist 注册表在函数内延迟 import（codelist.executor 依赖 database.backend，
+    与 database 包构成双向依赖，延迟导入拆环，避免启动时 import 顺序脆弱性）。
+    """
+    # 延迟导入拆环（见 docstring）：codelist 与 database 双向依赖，运行时已就绪再取注册表
+    from app.harness.tools.codelist.registry import codelist_registry
+    if not parsed["rows"]:
+        return "未查询到相关记录。"
+    columns = def_.select_columns or parsed["columns"]
+    headers = def_.column_headers if def_.select_columns else parsed["columns"]
+    code_refs = def_.column_code_refs
+    lines = ["\t".join(headers)]
+    for row in parsed["rows"]:
+        if code_refs:
+            # 浅拷贝行，翻译标注列，不破坏原始行（审计/复用不受影响）
+            shown = dict(row)
+            for col, code_ref in code_refs.items():
+                raw = shown.get(col)
+                if raw is not None:
+                    shown[col] = await codelist_registry.translate(def_.db, code_ref, raw)
+        else:
+            shown = row
+        lines.append("\t".join("" if shown.get(c) is None else str(shown.get(c)) for c in columns))
+    head = f"共 {len(parsed['rows'])} 条记录" + ("（结果已截断）" if parsed["truncated"] else "")
+    return head + "\n" + "\n".join(lines)
+
+
+async def execute_tool(def_: ToolDef, params: dict) -> str:
+    """执行一个领域工具定义，返回给 LLM 的文本结果。
+
+    每次调用双写日志：
+    - 审计通道（app.audit）：工具、数据库、参数、占位符 SQL、行数、耗时——安全证据链；
+    - 对话链路通道（app.conversation）：工具、参数、行数——与同帧提问/回复关联成完整链路。
+    入参非法/执行被拒的失败同样两条都记，保证链路完整。
+    """
+    started = time.perf_counter()
+    sql: str | None = None
+    binds: dict | None = None
+    try:
+        if def_.mode == "declarative":
+            sql, binds = build_select_sql(def_, params)
+        else:
+            sql, binds = build_template_sql(def_, params)
+        # 查询执行由 core/database/oracle 驱动提供（连接池，绑定变量执行）
+        parsed = await db_run_query(def_.db, sql, binds, def_.limit)
+        text = await format_result(def_, parsed)
+    except (ToolInputError, OracleError) as exc:
+        # 入参非法 / 执行被拒：记审计与链路后向上抛，由工具层转为模型可读提示
+        audit_logger.warning(
+            "工具调用未执行（入参或执行被拒）",
+            tool=def_.name, db=def_.db, params=params, sql=sql, error=str(exc),
+        )
+        conversation_logger.warning("工具调用被拒", tool=def_.name, error=str(exc))
+        raise
+    duration_ms = round((time.perf_counter() - started) * 1000)
+    audit_logger.info(
+        "工具调用完成",
+        tool=def_.name, db=def_.db, params=params, sql=sql,
+        rows=len(parsed["rows"]), truncated=parsed["truncated"], duration_ms=duration_ms,
+    )
+    conversation_logger.info(
+        "工具调用",
+        tool=def_.name, params=params,
+        rows=len(parsed["rows"]), truncated=parsed["truncated"], duration_ms=duration_ms,
+    )
+    return text

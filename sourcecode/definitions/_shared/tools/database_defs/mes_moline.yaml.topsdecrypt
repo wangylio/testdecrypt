@@ -1,0 +1,25 @@
+# 工艺数据比对域工具定义（2026-08-25 新增）
+#
+# 跨表关联查询：产线明细（MESMOLINE）按 MOID 关联生产工单主表（MBSMO）。
+# 用户给定生产工单号（如 D28MO260820012-001），返回其所属生产工单的
+# 工单号 / CRM 单据号 / CRM 行号。跨表取列 declarative 单表引擎无法表达，故走 template。
+# 表名加 BASIC. 前缀（只读账号直连约定，与 esop.yaml 一致）。
+# 入参一律绑定变量（:moline_docno），值不进入 SQL 文本。
+
+- name: query_moline
+  description: 按生产工单号（moline 单号，如 D28MO260820012-001）查询其所属生产工单的工单号、CRM单据号、CRM行号（经 MESMOLINE 关联 MBSMO 主工单）。用于回答"某生产工单号对应的工单及 CRM 单号、CRM 行号"等问题。
+  mode: template
+  db: mes
+  sql: |
+    SELECT mo.DOCNO AS 工单号,
+           mo.CRMDOCNO AS CRM单据号,
+           mo.CRMLINENO AS CRM行号
+    FROM BASIC.MESMOLINE moline
+    INNER JOIN BASIC.MBSMO mo ON mo.id = moline.MOID
+    WHERE moline.DOCNO = :moline_docno
+  params:
+    - name: moline_docno
+      type: string
+      description: 生产工单号（必填，如 D28MO260820012-001）
+      required: true
+  limit: 10

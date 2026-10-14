@@ -1,0 +1,20 @@
+"""会话管理（harness 会话层）：短期对话记忆的持久化与生命周期。
+
+从 runtime 拆出独立成包，为将来多会话后端（内存 / Redis / 其他存储）留接口位；
+当前实现为自管 SQLite 单表快照（见 sqlite.py），不依赖任何 Agent 框架会话组件。
+
+对外接口：SessionManager / session_manager 单例 / 会话相关异常。
+"""
+from app.harness.session.sqlite import (
+    SessionManager,
+    SessionNotBelongError,
+    SessionNotFoundError,
+    session_manager,
+)
+
+__all__ = [
+    "SessionManager",
+    "session_manager",
+    "SessionNotFoundError",
+    "SessionNotBelongError",
+]

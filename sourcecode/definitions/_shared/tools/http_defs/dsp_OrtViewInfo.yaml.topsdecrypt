@@ -1,0 +1,55 @@
+# 工艺数据比对外部接口工具：按销售申请单号及行号（CRM单号行号）查询订单评审表单（只读）。
+#
+# body 模板声明整段请求体：templateid/pageSize/pageNum 固定字段原样下发，
+# {param} 占位符由引擎替换为参数值（参数在 params 声明）。paramsMap 下的
+# sourcedocno / sourcedoclineno 即用户输入的销售申请单号（CRM单号）及其行号。
+# 响应以 success=true 判定业务成功，数据列表在 result.dataList。
+
+- name: dsp_OrtViewInfo
+  description: 按销售申请单号及行号（CRM单号行号）查询订单评审表单数据（只读查询接口）。用于回答"查订单评审表单 / 查某销售申请单对应的评审信息 / 查评审模板、评审类型、产品大类与评审数量"等订单评审相关问题。
+  endpoint: dsp-service
+  method: POST
+  path: /dsp-service/dsp/template/v1/query
+  body:
+    templateid: MESQueryCRMOrtViewInfo
+    pageSize: 0
+    pageNum: 0
+    paramsMap:
+      sourcedocno: "{sourcedocno}"
+      sourcedoclineno: "{sourcedoclineno}"
+  params:
+    - name: sourcedocno
+      type: string
+      description: 销售申请单号（CRM单号，精确匹配，必填，如 CH26072800004）
+      required: true
+      location: body
+    - name: sourcedoclineno
+      type: string
+      description: 销售申请单行号（CRM行号，精确匹配，必填，如 3）
+      required: true
+      location: body
+  result_path: result.dataList
+  success_field: success
+  success_value: true
+  columns:
+    - "docno: 订单号"
+    - "sourcedocno: 销售申请单号"
+    - "sourcedoclineno: 销售申请单行号"
+    - "sourcedocnotype: 单据类型"
+    - "ordernumber: 订购数量"
+    - "productdetail: 产品明细"
+    - "templatename: 评审模板"
+    - "dispbigtype: 产品大类"
+    - "dispmiddletype: 产品中类"
+    - "dispsmalltype: 产品小类"
+    - "disportreviewtype: 评审类型"
+    - "customercode: 客户编码"
+    - "saledeptname: 营销部门"
+    - "docsource: 单据来源"
+    - "datedemand: 交期要求"
+    - "shipaddress: 收货地址"
+    - "winproject: 中标项目"
+    - "sumchangenum: 变更次数"
+    - "username: 操作人"
+    - "description: 备注"
+  limit: 50

@@ -6,8 +6,10 @@
 功能：
     1. 遍历指定输入路径下的所有文件（递归）
     2. 排除指定后缀类型的文件
-    3. 在输出路径下创建 "原文件名 + 指定后缀名" 的新文件
-    4. 读取原文件内容并写入新文件
+    3. 读取原文件内容前，先给原文件临时补上 PREPEND_SUFFIX（默认 .py），
+       借 DLP 不加密 .py 的特性让它把内容解密出来
+    4. 在输出路径下创建 "原文件名 + 指定后缀名" 的新文件
+    5. 读取原文件内容并写入新文件，读完把原文件名改回去
 
 说明：
     参数在下面的「参数配置区域」给出默认值，启动 startup.bat 时由它交互式配置并
@@ -35,10 +37,10 @@ USAGE = """用法：
 """
 
 # 输入路径（要遍历的源文件夹）
-INPUT_DIR = r"E:\python\pycharm\PyCrypt\sourcecode\testa"
+INPUT_DIR = r"E:\python\pycharm\PyCrypt\testa"
 
 # 输出路径（输出文件存放的文件夹）
-OUTPUT_DIR = r"E:\python\pycharm\PyCrypt\sourcecode\testb"
+OUTPUT_DIR = r"E:\python\pycharm\PyCrypt\testb"
 
 # 要排除的后缀类型（逗号分隔，如 ".log,.tmp"；留空表示不排除）
 EXCLUDE_SUFFIXES_STR = ".log,.tmp"
@@ -48,6 +50,14 @@ TARGET_SUFFIX = ".bak"
 
 # 是否保留原目录结构（True: 输出保留子目录结构；False: 全部平铺到输出目录）
 KEEP_DIR_STRUCTURE = True
+
+# 读取原文件内容前，先给原文件临时补上这个后缀（留空表示不改名）
+# DLP 只加密 .h/.cpp 这类源码文件，不加密 .py；改名成 .py 后驱动会把内容
+# 解密出来，python 才读得到明文，否则读到的是密文（长度会被补齐到 20KB 的倍数）
+PREPEND_SUFFIX = ".py"
+
+# 读完内容后是否把原文件名改回去（False: 源目录里的文件会一直带着上面的后缀）
+RESTORE_ORIGINAL_NAME = True
 
 # ============================================================
 # ============================================================
@@ -120,6 +130,10 @@ def process_files(input_dir, output_dir, exclude_suffixes, target_suffix,
     if target_suffix and not target_suffix.startswith('.'):
         target_suffix = '.' + target_suffix
 
+    prepend_suffix = PREPEND_SUFFIX
+    if prepend_suffix and not prepend_suffix.startswith('.'):
+        prepend_suffix = '.' + prepend_suffix
+
     ensure_dir(output_dir)
 
     total = 0
@@ -153,9 +167,23 @@ def process_files(input_dir, output_dir, exclude_suffixes, target_suffix,
             ensure_dir(out_dir)
             dst_path = os.path.join(out_dir, new_name)
 
+            # 读取前先给原文件临时补上 .py 后缀，让 DLP 把内容解密出来。
+            # 不管原文件名是不是已经是 .py 结尾，都照补不误。
+            read_path = src_path
+            temp_path = None
+            if prepend_suffix:
+                temp_path = os.path.join(root, filename + prepend_suffix)
+                try:
+                    os.rename(src_path, temp_path)
+                    read_path = temp_path
+                except OSError as e:
+                    print(f"[失败] 改名失败：{src_path} -> {temp_path}，错误：{e}")
+                    failed += 1
+                    continue
+
             # 读取原文件内容并写入新文件（二进制方式，避免编码问题）
             try:
-                with open(src_path, 'rb') as fsrc:
+                with open(read_path, 'rb') as fsrc:
                     data = fsrc.read()
                 with open(dst_path, 'wb') as fdst:
                     fdst.write(data)
@@ -164,6 +192,13 @@ def process_files(input_dir, output_dir, exclude_suffixes, target_suffix,
             except Exception as e:
                 print(f"[失败] {src_path} -> {dst_path}，错误：{e}")
                 failed += 1
+            finally:
+                # 内容已经读出来了，把原文件名改回去，别污染源目录
+                if temp_path and RESTORE_ORIGINAL_NAME:
+                    try:
+                        os.rename(temp_path, src_path)
+                    except OSError as e:
+                        print(f"[警告] 原文件名改回失败，现在还是：{temp_path}，错误：{e}")
 
     print("\n========== 处理完成 ==========")
     print(f"总计文件：{total}")
@@ -199,6 +234,8 @@ def main():
     print(f"输出路径     ：{OUTPUT_DIR}")
     print(f"排除后缀     ：{exclude_suffixes if exclude_suffixes else '（无）'}")
     print(f"目标后缀     ：{TARGET_SUFFIX}")
+    print(f"读取前补后缀 ：{PREPEND_SUFFIX}")
+    print(f"读完改回     ：{RESTORE_ORIGINAL_NAME}")
     print(f"保留目录结构 ：{KEEP_DIR_STRUCTURE}")
     print("\n开始处理...\n")
 

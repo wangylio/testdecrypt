@@ -1,0 +1,31 @@
+"""Agent 注册表：以名称登记 Agent，供 API 层按名分发执行。
+
+注册表为模块级单例，由应用入口（app/main.py）装配，业务 Agent 的 register() 直接引用。
+值类型为 LangChain 编译图（create_agent 产出），运行时可并发 ainvoke。
+"""
+from __future__ import annotations
+
+from langgraph.graph.state import CompiledStateGraph
+
+
+class AgentRegistry:
+    """以 {name: CompiledStateGraph} 字典登记 Agent。"""
+
+    def __init__(self) -> None:
+        self._agents: dict[str, CompiledStateGraph] = {}
+
+    def register(self, name: str, agent: CompiledStateGraph) -> None:
+        """登记一个 Agent。"""
+        self._agents[name] = agent
+
+    def get(self, name: str) -> CompiledStateGraph | None:
+        """按名称获取 Agent，未登记时返回 None。"""
+        return self._agents.get(name)
+
+    def names(self) -> list[str]:
+        """返回所有已登记 Agent 的名称。"""
+        return list(self._agents)
+
+
+# 模块级注册表单例，供 API 层与业务 Agent 装配引用
+agent_registry = AgentRegistry()

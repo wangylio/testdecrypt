@@ -15,13 +15,13 @@ rem ============================================================
 
 rem ---------- 默认参数（要改默认值就改这里）----------
 rem 加密（encrypt.py）
-set "DEF_ENC_INPUT=E:\_github\testdecrypt\code"
-set "DEF_ENC_OUTPUT=E:\_github\testdecrypt\testdecrypt\sourcecode"
-set "DEF_ENC_EXCLUDE=.log,.tmp"
+set "DEF_ENC_INPUT=E:\vba\perf-xxxt\perf-xxxt\decrypt\encrypt"
+set "DEF_ENC_OUTPUT=E:\vba\perf-xxxt\perf-xxxt\decrypt\decrypt"
+set "DEF_ENC_EXCLUDE=.cache,.tmp"
 set "DEF_ENC_SUFFIX=.topsdecrypt"
 set "DEF_ENC_KEEP=True"
 rem 解密（decrypt.py）
-set "DEF_DEC_TARGET=E:\_github\testdecrypt\testdecrypt\sourcecode"
+set "DEF_DEC_TARGET=E:\vba\perf-xxxt\perf-xxxt\decrypt\decrypt"
 set "DEF_DEC_STRIP=.topsdecrypt"
 set "DEF_DEC_RECURSIVE=True"
 set "DEF_DEC_CONFLICT=overwrite"

@@ -1,0 +1,36 @@
+"""业务 Agent 层：装配入口、显式清单与领域工具承载约定。
+
+register_all_agents() 是全部业务 Agent 的装配清单：
+新增 Agent = 建包 + 在此追加调用，main.py 只需调 register_all_agents() 一行，不随 Agent 增长。
+
+每个 Agent 一个子包（definitions/<agent>/），包内文件承载约定：
+- agent.py              本 Agent 定义：instructions + 模型名 + 工具清单装配，不做业务逻辑
+- tools/                Agent 的工具根目录：
+    - tools/*.py        代码型领域工具（@tool），一个文件一组相关工具，
+                        __init__.py 统一导出供 agent.py 引用
+    - tools/<能力包>_defs/*.yaml
+                        数据驱动工具声明（查库/外部服务），按所依赖的 harness 能力包
+                        分子目录（如 database_defs/ 归 harness/tools/database 执行），
+                        只放声明，执行归对应能力包引擎
+
+通用工具/通用 MCP 一律依赖 harness/；本层只放该 Agent 独有的工具。
+"""
+from __future__ import annotations
+
+
+def register_all_agents() -> None:
+    """按显式清单装配全部业务 Agent（顺序即清单顺序）。"""
+    from app.definitions.echo import register as _register_echo
+    from app.definitions.mes_device_assistant import register as _register_mes_device_assistant
+    from app.definitions.mes_process_assistant import register as _register_mes_process_assistant
+    from app.definitions.mes_process_esop_compare import register as _register_mes_process_esop_compare
+    from app.definitions.mes_process_markdata_compare import register as _register_mes_process_markdata_compare
+
+    _register_echo()
+    _register_mes_device_assistant()
+    _register_mes_process_assistant()
+    _register_mes_process_esop_compare()
+    _register_mes_process_markdata_compare()
+
+
+__all__ = ["register_all_agents"]

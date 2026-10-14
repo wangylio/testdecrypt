@@ -1,0 +1,37 @@
+"""工艺数据查询与知识问答智能体定义。
+
+数据驱动：数据库查询走 tools/database_defs/*.yaml（database 能力包），
+外部接口走 tools/http_defs/*.yaml（http 能力包），引用 resources/ 下的实例目录。
+提示词从 resources/prompts/ 按名读取，不在此硬编码。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from langchain.agents import create_agent
+
+from app.harness.llm import get_model
+from app.harness.prompts import prompt_registry
+from app.harness.registry import agent_registry
+from app.harness.tools.database import build_tools
+from app.harness.tools.http import build_tools as build_http_tools
+
+# 能力包声明目录：tools/<能力包名>_defs/，与 agent.py 同级的 tools/ 下
+_DATABASE_DEFS_DIR = Path(__file__).resolve().parent / "tools" / "database_defs"
+_HTTP_DEFS_DIR = Path(__file__).resolve().parent / "tools" / "http_defs"
+
+
+def register() -> None:
+    """装配工艺助手：加载工具定义并注册 Agent。
+
+    数据库目录 / 端点目录由平台层（app/main.py）统一加载，本模块不负责。
+    数据驱动工具经 tools/*_defs/*.yaml 声明，引用目录中的 db / endpoint 标识，
+    由对应 harness 能力包执行。提示词经 resources/prompts/ 声明，按 Agent 名读取。
+    模型构造失败（如缺密钥）时跳过注册，不阻塞应用启动。
+    """
+    agent = create_agent(
+        model=get_model("deepseek"),
+        tools=[*build_tools(_DATABASE_DEFS_DIR), *build_http_tools(_HTTP_DEFS_DIR)],
+        system_prompt=prompt_registry.get("mes_process_assistant"),
+    )
+    agent_registry.register("mes_process_assistant", agent)

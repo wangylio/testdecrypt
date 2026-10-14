@@ -1,0 +1,21 @@
+"""示例回显 Agent：复述用户输入，用于验证平台执行链路。
+
+模型通过 app/harness/llm.get_model() 按名选用（不同 Agent 可用不同 LLM），
+装配时经 create_agent 构造执行图；模型构造失败（如缺密钥）时跳过注册。
+提示词从 resources/prompts/ 按名读取，不在此硬编码。
+"""
+from langchain.agents import create_agent
+
+from app.definitions.echo.tools import get_current_time
+from app.harness.llm import get_model
+from app.harness.prompts import prompt_registry
+from app.harness.registry import agent_registry
+
+
+def register() -> None:
+    echo = create_agent(
+        model=get_model("deepseek"),
+        tools=[get_current_time],
+        system_prompt=prompt_registry.get("echo"),
+    )
+    agent_registry.register("echo", echo)

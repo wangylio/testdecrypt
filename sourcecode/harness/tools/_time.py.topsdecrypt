@@ -1,0 +1,75 @@
+"""共享纯工具：能力包间零依赖的时间换算与入参错误。
+
+相对时间换算（resolve_range）本是 database 能力包的一部分，http 能力包同样需要
+（date 型参数在引擎层换算，模型不计算日期）。为保持"能力包之间互不依赖"的约定，
+把这一组纯函数上提到 tools/ 下的共享模块，database 与 http 都 import 它。
+ToolInputError 是各能力包公共的"入参问题"异常，一并放置。
+
+本模块只依赖标准库，不含任何业务 / 能力包概念，可独立演进。
+"""
+from __future__ import annotations
+
+import re
+from datetime import date, timedelta
+
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_REL_RE = re.compile(r"^last_(\d+)([dwmy])$")
+
+
+class ToolInputError(Exception):
+    """入参问题（向模型返回可读提示）。"""
+
+
+# ---- 相对时间换算（集中一处）----
+
+
+def resolve_range(date_from, date_to, today: date | None = None):
+    """把 date_from/date_to（ISO 或相对表达式）换算为绝对日期字符串。
+
+    返回 (from_str | None, to_str | None)。date_to 缺省为今天；
+    last_X 表达式表示"以今天为终点的最近 X 区间"。
+    """
+    today = today or date.today()
+    from_str = _resolve_one(date_from, today)
+    to_str = _resolve_one(date_to, today)
+    if from_str is not None and to_str is None:
+        to_str = today.isoformat()
+    return from_str, to_str
+
+
+def _resolve_one(value, today: date) -> str | None:
+    if value is None or str(value).strip() == "":
+        return None
+    v = str(value).strip()
+    if _ISO_RE.match(v):
+        return v
+    m = _REL_RE.match(v)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if unit == "d":
+            start = today - timedelta(days=n)
+        elif unit == "w":
+            start = today - timedelta(weeks=n)
+        elif unit == "m":
+            start = _add_months(today, -n)
+        else:  # y
+            start = _add_months(today, -12 * n)
+        return start.isoformat()
+    raise ToolInputError(f"无法识别的时间表达式：{value}（支持 YYYY-MM-DD 或 last_1d/1w/1m/1y）")
+
+
+def _add_months(d: date, months: int) -> date:
+    total = d.month - 1 + months
+    y = d.year + total // 12
+    m = total % 12 + 1
+    day = min(d.day, _days_in_month(y, m))
+    return date(y, m, day)
+
+
+def _days_in_month(y: int, m: int) -> int:
+    if m == 12:
+        nxt = date(y + 1, 1, 1)
+    else:
+        nxt = date(y, m + 1, 1)
+    return (nxt - timedelta(days=1)).day

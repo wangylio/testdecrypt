@@ -1,0 +1,95 @@
+"""codelist 能力包的注册表：声明式登记 + 惰性加载 + 翻译。
+
+存储用 `(db, code_ref)` 复合键隔离多数据源；code_ref 分两类，只按精确标识检索、无回退路径：
+- 裸标识（如 `factory`）→ 精确匹配 mode: database 条目的 id。
+- 点号标识（如 `cboitems.CboYesNo`）→ 前半段匹配 mode: auto 体系的 id，后半段为子类型名。
+
+translate 为增值能力：未注册 / 未命中 / 加载失败均原样返回编码，不中断查询。
+本层只认 (db, code_ref) 与两种声明模型，对具体表结构、SQL 无感知。
+"""
+from __future__ import annotations
+
+from app.core.logging import get_logger
+from app.harness.tools.codelist.executor import CodelistLoadError, load_auto_spec, load_database_spec
+from app.harness.tools.codelist.specs import AutoCodelistSpec, CodelistSpec, load_codelists
+
+logger = get_logger(__name__)
+
+# 加载结果上限：防超大字典一次拉爆内存；足够容纳常见几百行字典
+_LOAD_LIMIT = 10000
+
+
+class CodelistRegistry:
+    """持有代码表声明，惰性加载映射并按 (db, code_ref) 翻译编码值。"""
+
+    def __init__(self) -> None:
+        self._independent: dict[tuple[str, str], CodelistSpec] = {}   # (db, id) → database 条目
+        self._auto: dict[tuple[str, str], AutoCodelistSpec] = {}      # (db, id) → auto 体系
+        self._maps: dict[tuple[str, str], dict[str, str]] = {}        # (db, code_ref) → 映射缓存
+
+    def register(self, spec: CodelistSpec | AutoCodelistSpec) -> None:
+        """登记一条代码表声明（只记声明，不加载）。"""
+        key = (spec.db, spec.id)
+        if isinstance(spec, AutoCodelistSpec):
+            self._auto[key] = spec
+        else:
+            self._independent[key] = spec
+
+    async def translate(self, db: str, code_ref: str, value) -> str:
+        """把编码值翻译为中文名；任何失败兜底为原样输出 str(value)。
+
+        code_ref 无点号 = 独立表；有点号 = auto 体系.subtype。映射按需惰性加载并缓存。
+        """
+        key = (db, code_ref)
+        mapping = self._maps.get(key)
+        if mapping is None:
+            mapping = await self._resolve(db, code_ref)
+            if mapping is not None:
+                self._maps[key] = mapping
+        if not mapping:
+            return str(value)
+        return mapping.get(str(value), str(value))
+
+    async def _resolve(self, db: str, code_ref: str) -> dict[str, str] | None:
+        """确定 code_ref 的类型并加载映射；未注册返回 None（translate 原样输出）。"""
+        if "." in code_ref:
+            ref_id, subtype = code_ref.split(".", 1)
+            # 大小写不敏感匹配：YAML 引用可能大小写不统一
+            spec = next(
+                (s for (d, rid), s in self._auto.items() if d == db and rid.lower() == ref_id.lower()),
+                None,
+            )
+            if spec is None:
+                logger.warning("代码表子类型引用未注册", db=db, code_ref=code_ref)
+                return None
+            try:
+                return await load_auto_spec(spec, subtype, _LOAD_LIMIT)
+            except CodelistLoadError:
+                return None
+        # 独立表同样大小写不敏感
+        spec = next(
+            (s for (d, rid), s in self._independent.items() if d == db and rid.lower() == code_ref.lower()),
+            None,
+        )
+        if spec is None:
+            logger.warning("代码表引用未注册", db=db, code_ref=code_ref)
+            return None
+        try:
+            return await load_database_spec(spec, _LOAD_LIMIT)
+        except CodelistLoadError:
+            return None
+
+
+def register_all_codelists() -> None:
+    """从 resources/codelists.yaml 把全部代码表声明登记到模块级注册表。
+
+    数据驱动：声明式加载，不触发数据库查询；首次翻译引用时才惰性查库。
+    """
+    for spec in load_codelists():
+        codelist_registry.register(spec)
+    keys = sorted(codelist_registry._independent) + sorted(codelist_registry._auto)
+    logger.info("代码表目录装配", codelists=[f"{db}:{ref}" for db, ref in keys])
+
+
+# 模块级代码表注册表单例，供工具引擎 / 装配引用
+codelist_registry = CodelistRegistry()

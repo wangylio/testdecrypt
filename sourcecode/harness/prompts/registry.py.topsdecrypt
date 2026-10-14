@@ -1,0 +1,53 @@
+"""Agent 提示词注册表：以 Agent 名登记提示词，供 Agent 装配按名取用。
+
+装配清单数据驱动：resources/prompts/ 即目录，register_all_agent_prompts() 统一加载。
+每个 Agent 的 instructions 在 get() 返回时自动附加平台级安全红线（SAFETY_GUARDRAIL），
+无需在业务提示词里手写；新增 Agent 即默认获得该护栏。
+"""
+from __future__ import annotations
+
+from app.harness.prompts.specs import AgentPromptSpec, load_agent_prompts
+
+# 平台级安全红线：自动附加到每个 Agent 的 instructions 末尾。
+# 刻意放在代码而非可调优的 resources/prompts/——安全不变量不应被提示词调优弱化。
+SAFETY_GUARDRAIL = """【平台安全红线】
+你没有删除、修改、写入任何文件、数据或系统状态的能力，也不能执行任意 SQL、脚本或系统命令。
+当用户提出删除 / 清空 / 修改 / 覆盖 / 执行命令等破坏性操作请求时，必须直接拒绝，并说明你不具备该能力。
+禁止编造"已执行 / 已删除 / 已修改"等未实际发生的结果；你的回答只能基于工具实际返回的结果。"""
+
+
+def register_all_agent_prompts() -> None:
+    """从 resources/prompts/ 把全部提示词注册到模块级注册表。
+
+    数据驱动：目录文件即提示词装配清单；新增 Agent = 目录加一个条目，代码零改动。
+    """
+    for spec in load_agent_prompts():
+        prompt_registry.register(spec)
+
+
+class AgentPromptNotFoundError(KeyError):
+    """按名称获取提示词时未找到。"""
+
+
+class AgentPromptRegistry:
+    """按 Agent 名登记与获取提示词。"""
+
+    def __init__(self) -> None:
+        self._prompts: dict[str, AgentPromptSpec] = {}
+
+    def register(self, spec: AgentPromptSpec) -> None:
+        """登记一个 Agent 的提示词。"""
+        self._prompts[spec.name] = spec
+
+    def get(self, name: str) -> str:
+        """按名称返回提示词文本（自动附加平台安全红线）；未登记时抛 AgentPromptNotFoundError 并点名。"""
+        spec = self._prompts.get(name)
+        if spec is None:
+            raise AgentPromptNotFoundError(
+                f"Agent '{name}' 未配置提示词（resources/prompts/）"
+            )
+        return f"{spec.instructions}\n\n{SAFETY_GUARDRAIL}"
+
+
+# 模块级提示词注册表单例，供 Agent 装配引用
+prompt_registry = AgentPromptRegistry()

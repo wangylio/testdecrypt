@@ -1,0 +1,80 @@
+"""codelist 能力包的定义模型与加载（通用，业务无关）。
+
+与 database 能力包的 defs.py 同构：YAML → pydantic 校验 → 注册表。
+两种来源模式（用 mode 判别）：
+- mode: database —— 独立字典表：一段 SQL + value_column（编码列）+ label_column（中文名列）。
+- mode: auto     —— 统一编码表体系（CBOITEMS + ITEMDETAILS 模式）：声明主表/明细表结构，
+                    引擎自动发现主表的每个子类型（items_code_column 的值即是可引用的子类型名），
+                    新增子类型无需修改本目录。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel
+
+from app.core.config.settings import PROJECT_ROOT
+
+# 平台代码表目录默认路径（可用环境变量 CODELISTS_PATH 覆盖）
+DEFAULT_CODELISTS_PATH = PROJECT_ROOT / "resources" / "codelists.yaml"
+
+
+class CodelistSpec(BaseModel):
+    """独立字典表来源的代码表声明（mode: database）。
+
+    sql 返回的列中，value_column 命名编码列、label_column 命名中文名列。
+    如：sql=SELECT id, name FROM BASIC.MbsFactory, value_column=id, label_column=name。
+    """
+
+    id: str                       # 代码表唯一标识（裸引用：translate 无点号时精确匹配它）
+    db: str                       # 所属数据库（指向 resources/databases.yaml 的 db id）
+    mode: Literal["database"] = "database"
+    sql: str
+    value_column: str
+    label_column: str
+
+
+class AutoCodelistSpec(BaseModel):
+    """统一编码表体系来源的声明（mode: auto）。
+
+    主表每行声明一个子类型（items_code_column 的值，如 CboYesNo）；
+    明细表每行是一个编码映射（detail_code_column → detail_name_column）。
+    翻译引用 `{id}.{子类型名}`（如 cboitems.CboYesNo）时，引擎按子类型惰性加载映射。
+    """
+
+    id: str                       # 体系标识（点号引用的前半段，如 cboitems）
+    db: str
+    mode: Literal["auto"] = "auto"
+    items_table: str              # 主表（如 BASIC.CBOITEMS）
+    items_code_column: str        # 主表的子类型标识编码列
+    detail_table: str             # 明细表（如 BASIC.ITEMDETAILS）
+    detail_link_column: str       # 明细表关联主表 id 的列（如 itemid）
+    detail_code_column: str       # 明细表的编码列
+    detail_name_column: str       # 明细表的中文名列
+
+
+def load_codelists(path: Path | str | None = None) -> list[CodelistSpec | AutoCodelistSpec]:
+    """从代码表目录加载全部声明（按列表顺序，mode 判别模型）。
+
+    目录缺失或为空时返回空列表（代码表是增值能力，缺失不阻碍平台启动）；
+    条目缺关键字段时抛 ValueError 点名（与 databases.yaml 同构的启动即校验）。
+    """
+    resolved = Path(path or DEFAULT_CODELISTS_PATH)
+    if not resolved.exists():
+        return []
+    data = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
+    specs: list[CodelistSpec | AutoCodelistSpec] = []
+    for item in data.get("codelists", []):
+        mode = item.get("mode")
+        if mode == "auto":
+            specs.append(AutoCodelistSpec.model_validate(item))
+        elif mode == "database":
+            specs.append(CodelistSpec.model_validate(item))
+        else:
+            raise ValueError(
+                f"代码表条目缺少有效 mode（须为 database 或 auto）：{item.get('id')}"
+            )
+    return specs

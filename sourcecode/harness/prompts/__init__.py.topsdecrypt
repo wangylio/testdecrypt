@@ -1,0 +1,8 @@
+"""harness/prompts：业务无关的 Agent 提示词目录层（声明式加载）。
+
+镜像 harness/mcp/ 的数据驱动模式：resources/prompts/ → pydantic 校验 → 注册表，应用启动时装配。
+Agent 定义层按名取用提示词，本层不感知任何 Agent 业务。
+"""
+from app.harness.prompts.registry import prompt_registry, register_all_agent_prompts
+
+__all__ = ["prompt_registry", "register_all_agent_prompts"]

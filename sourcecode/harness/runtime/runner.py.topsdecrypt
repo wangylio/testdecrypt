@@ -1,0 +1,74 @@
+"""运行时：封装 LangChain create_agent 编译图的执行逻辑。
+
+API 层通过本模块调用，不直接接触 LangGraph。执行形态：一次请求 =
+读历史（可选）→ ainvoke（带历史续接）→ 快照写回，同会话三步包 per-session 锁。
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+
+from app.core.config.settings import settings
+
+
+@dataclass
+class AgentRunResult:
+    """一次 Agent 运行的产出与元数据：回复文本、token 用量、耗时。
+
+    usage 字段含义（多轮模型调用逐次累加）：
+      requests      有 token 用量的模型调用次数
+      input_tokens  输入 token 总数
+      output_tokens 输出 token 总数
+      total_tokens  总 token 数
+    """
+
+    final_output: str
+    usage: dict[str, int]
+    duration_ms: int
+
+
+def _aggregate_usage(messages: list[BaseMessage]) -> dict[str, int]:
+    """汇总整个运行的 token 用量：AIMessage 的 usage_metadata 逐项累加（None 跳过）。"""
+    totals = {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    for msg in messages:
+        if not isinstance(msg, AIMessage) or msg.usage_metadata is None:
+            continue
+        usage = msg.usage_metadata
+        totals["requests"] += 1
+        totals["input_tokens"] += usage.get("input_tokens", 0)
+        totals["output_tokens"] += usage.get("output_tokens", 0)
+        totals["total_tokens"] += usage.get("total_tokens", 0)
+    return totals
+
+
+def _final_reply(messages: list[BaseMessage]) -> str:
+    """取最后一条 AI 消息的文本作为回复（防御：不假定末条即 AI 消息）。"""
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and msg.content:
+            return str(msg.content)
+    return ""
+
+
+async def run_agent(agent, message: str, session=None) -> AgentRunResult:
+    """执行 Agent，返回产出与元数据（回复、token 用量、耗时）。
+
+    agent 为 create_agent 编译图；session 为会话句柄（可选）：
+    None 时为无上下文单发；传入后续接该会话历史（按 settings.session_history_limit
+    读时裁剪）并在执行后快照写回。同会话三步包 per-session 锁防并发丢回合。
+    执行失败异常向上抛，由 API 层记录并返回错误。
+    """
+    started = time.perf_counter()
+    if session is None:
+        result = await agent.ainvoke({"messages": [HumanMessage(content=message)]})
+    else:
+        async with session.lock:
+            history = await session.load(settings.session_history_limit)
+            result = await agent.ainvoke({"messages": [*history, HumanMessage(content=message)]})
+            await session.save(result["messages"])
+    return AgentRunResult(
+        final_output=_final_reply(result["messages"]),
+        usage=_aggregate_usage(result["messages"]),
+        duration_ms=round((time.perf_counter() - started) * 1000),
+    )

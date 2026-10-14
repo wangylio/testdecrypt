@@ -31,7 +31,7 @@ USAGE = """用法：
 """
 
 # 目标目录（要遍历的文件夹）
-TARGET_DIR = r"E:\python\pycharm\PyCrypt\sourcecode\testb"
+TARGET_DIR = r"E:\python\pycharm\PyCrypt\testb"
 
 # 要去掉的后缀名（如 ".bak"）
 SUFFIX_TO_REMOVE = ".bak"

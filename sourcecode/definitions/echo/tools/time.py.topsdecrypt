@@ -1,0 +1,24 @@
+"""echo 的代码型领域工具：返回当前日期与本地时间。
+
+作为平台第一个代码工具示例，用于验证"模型决定调用工具 → 平台执行 → 结果回填 → 继续/终止"
+的 ReAct 循环链路。工具的 docstring 即模型看到的工具描述，需写清用途与使用时机。
+业务工具的代码版统一放 <agent>/tools/ 下；数据驱动版（查库/外部服务）放
+<agent>/tools/<能力包名>_defs/（如 database_defs/）。
+"""
+from datetime import datetime
+
+from langchain_core.tools import tool
+
+# 中文星期名，weekday() 返回 0（周一）~ 6（周日）
+_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+
+@tool
+def get_current_time() -> str:
+    """获取当前日期与时间。
+
+    用户询问"现在几点""今天几号""当前时间"等与时间相关的问题时调用。
+    返回中文本地日期、时间、星期与所在时区。
+    """
+    now = datetime.now().astimezone()
+    return f"{now:%Y-%m-%d %H:%M:%S} {_WEEKDAYS[now.weekday()]}（时区 {now.tzinfo}）"

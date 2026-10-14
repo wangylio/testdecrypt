@@ -1,0 +1,8 @@
+"""echo Agent 的代码型领域工具（@tool）。
+
+统一从本包导出，供 agent.py 装配；工具实现见各功能文件（如 time.py）。
+与通用工具的分界：通用工具在 harness/tools/，本包只放 echo 专属工具。
+"""
+from app.definitions.echo.tools.time import get_current_time
+
+__all__ = ["get_current_time"]

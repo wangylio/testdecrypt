@@ -1,0 +1,223 @@
+"""http 能力包的执行引擎：按 HttpToolDef 组装请求、经 backend 调用、解析并格式化。
+
+- 参数全结构化（params 声明 location），引擎按 path/query/body/header 组装，
+  模型只能填声明过的值，不能传任意 JSON body。
+- date 型参数在引擎层换算相对时间（resolve_range），模型不计算日期。
+- 响应解析：校验业务 code（成功值 0/200，缺省跳过）→ result_path 取数据列表。
+- 每次调用双写日志：审计通道 + 对话链路通道（同 request_id）。
+"""
+from __future__ import annotations
+
+import re
+import time
+
+from app.core.logging import get_logger
+from app.core.http.client import HttpError
+from app.harness.tools._time import ToolInputError, resolve_range
+from app.harness.tools.codelist.registry import codelist_registry
+from app.harness.tools.http.backend import get_base_url
+from app.harness.tools.http.backend import request as http_request
+from app.harness.tools.http.defs import HttpToolDef
+
+# 审计记录器：独立 logger 名，由日志装配路由到独立审计文件（logs/audit.log）
+audit_logger = get_logger("app.audit")
+
+# 对话链路记录器：本帧内的工具调用，写入对话通道（logs/conversation.log），
+# 与同请求的 用户提问 / Agent 回复 共享 request_id（经 contextvars 自动带上）
+conversation_logger = get_logger("app.conversation")
+
+_PLACEHOLDER_RE = re.compile(r"\{([^}]+)\}")
+
+# 缺省业务成功值（success_field 未声明 success_value 时校验；缺省字段也跳过）
+_SUCCESS_CODES = (0, 200)
+
+
+def build_request(def_: HttpToolDef, params: dict) -> tuple[str, str, dict, dict, dict]:
+    """校验参数并按 location 组装请求 → (method, path, query, body, headers)。
+
+    必填缺失/日期非法抛 ToolInputError（模型可读）；未提供的可选参数不携带
+    （有 default 则用 default）。body 声明了模板时按模板渲染（见 _render_body），
+    否则按 body 参数平铺。
+    """
+    query: dict[str, object] = {}
+    headers: dict[str, str] = {}
+    path_args: dict[str, str] = {}
+    body_values: dict[str, object] = {}
+
+    for p in def_.params:
+        value = params.get(p.name)
+        if value in (None, ""):
+            if p.required:
+                raise ToolInputError(f"缺少必填参数：{p.name}")
+            value = p.default
+        if value in (None, ""):
+            continue
+        if p.type == "date":
+            resolved, _ = resolve_range(value, None)
+            value = resolved
+        if p.location == "path":
+            path_args[p.name] = str(value)
+        elif p.location == "query":
+            query[p.name] = value
+        elif p.location == "header":
+            headers[p.name] = str(value)
+        else:  # body
+            body_values[p.name] = value
+
+    body = _render_body(def_.body, body_values) if def_.body else body_values
+    return def_.method, _substitute_path(def_.path, path_args), query, body, headers
+
+
+def _render_body(template: dict, values: dict[str, object]) -> dict:
+    """按 body 模板渲染请求体：`{param}` 精确整串占位符替换为参数值。
+
+    支持嵌套结构（如 {interfaceCode, paramsMap:{...}}）；模板中静态字段原样保留；
+    占位符对应参数未提供时渲染为空字符串（可选参数缺省即省略该字段的常见形态）。
+    """
+    def _walk(node):
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_walk(v) for v in node]
+        if isinstance(node, str):
+            m = _PLACEHOLDER_RE.fullmatch(node)
+            if not m:
+                return node
+            return values.get(m.group(1), "")
+        return node
+
+    return _walk(template)
+
+
+def _substitute_path(template: str, args: dict[str, str]) -> str:
+    """把 path 模板 {placeholder} 替换为路径参数值；残留占位符报可读错误。"""
+    result = template
+    for name, value in args.items():
+        result = result.replace("{" + name + "}", value)
+    leftover = _PLACEHOLDER_RE.findall(result)
+    if leftover:
+        raise ToolInputError(f"缺少路径参数：{leftover[0]}")
+    return result
+
+
+def _business_success(def_: HttpToolDef, raw) -> bool:
+    """按声明的 success_value 判定业务成功；未声明时沿用缺省 (0, 200)。"""
+    expected = def_.success_value
+    if expected is None:
+        return raw in _SUCCESS_CODES
+    if isinstance(expected, bool):
+        return bool(raw) is expected
+    return raw == expected
+
+
+def parse_response(def_: HttpToolDef, payload) -> tuple[list[dict], bool]:
+    """解析响应：校验业务成功，经 result_path 取数据列表 → (records, truncated)。
+
+    success_field / success_value 声明如何判定成功（缺省查 code∈0/200，field 不存在
+    即跳过校验，容忍无包裹结构接口）；result_path 定位不到值时视为无结果；
+    定位到非列表/非对象结构抛可读错误（提示调整 YAML，不改代码）。
+    """
+    if not isinstance(payload, dict):
+        raise ToolInputError(
+            f"工具 '{def_.name}': 响应不是对象结构，无法按 result_path='{def_.result_path}' 取数"
+        )
+    raw = payload.get(def_.success_field)
+    if raw is not None and not _business_success(def_, raw):
+        msg = payload.get("message") or f"业务失败：{def_.success_field}={raw}"
+        raise HttpError(f"外部系统 '{def_.endpoint}' 返回业务失败：{msg}")
+    value = _dig(payload, def_.result_path, def_)
+    if value is None:
+        return [], False
+    if not isinstance(value, list):
+        raise ToolInputError(f"工具 '{def_.name}': result_path='{def_.result_path}' 不是列表")
+    all_rows = [r for r in value if isinstance(r, dict)]
+    return all_rows[: def_.limit], len(all_rows) > def_.limit
+
+
+def _dig(payload: dict, path: str, def_: HttpToolDef):
+    """按点路径（如 data.records）逐段下钻字典/列表；缺段报可读错误提示调整 YAML。"""
+    current = payload
+    for segment in path.split("."):
+        if isinstance(current, dict) and segment in current:
+            current = current[segment]
+        elif isinstance(current, list) and segment.isdigit() and int(segment) < len(current):
+            current = current[int(segment)]
+        else:
+            raise ToolInputError(
+                f"工具 '{def_.name}': 响应中找不到 result_path='{path}'（段 '{segment}'），"
+                f"请核对 http_defs YAML 的 result_path 与接口实际返回结构"
+            )
+    return current
+
+
+async def format_result(def_: HttpToolDef, records: list[dict], truncated: bool) -> str:
+    """把记录组织为给 LLM 的紧凑制表符文本，并对 translate_columns 标注列翻译。
+
+    - 表头用 columns 内联声明的中文名（column_labels），无中文名回退裸列名。
+    - 取值按裸列名从记录读 key；取不到的 key 显示为空。
+    - 对标注 translate_columns 的列，经 codelist 注册表把编码译为中文
+      （数据源按 codelist_db 或 endpoint 隔离；翻译失败由注册表兜底原样输出编码，不中断渲染）。
+    """
+    if not records:
+        return "未查询到相关记录。"
+    columns = def_.select_columns
+    headers = def_.column_headers
+    code_refs = def_.code_refs
+    src = def_.codelist_db or def_.endpoint
+    lines = ["\t".join(headers)]
+    for record in records:
+        if code_refs:
+            # 浅拷贝行，翻译标注列，不破坏原始记录（审计/复用不受影响）
+            shown = dict(record)
+            for col, code_ref in code_refs.items():
+                raw = shown.get(col)
+                if raw is not None:
+                    shown[col] = await codelist_registry.translate(src, code_ref, raw)
+        else:
+            shown = record
+        lines.append("\t".join("" if shown.get(c) is None else str(shown.get(c)) for c in columns))
+    head = f"共 {len(records)} 条记录" + ("（结果已截断）" if truncated else "")
+    return head + "\n" + "\n".join(lines)
+
+
+async def execute_tool(def_: HttpToolDef, params: dict) -> str:
+    """执行一个 http 工具定义，返回给 LLM 的文本结果。
+
+    每次调用双写日志：
+    - 审计通道（app.audit）：工具、端点、完整 URL、参数、行数、耗时——安全证据链；
+    - 对话链路通道（app.conversation）：工具、参数、行数——与同帧提问/回复关联成完整链路。
+    入参非法/执行被拒的失败同样两条都记，保证链路完整。
+    """
+    started = time.perf_counter()
+    method: str = ""
+    path: str = ""
+    query: dict | None = None
+    records: list[dict] = []
+    truncated = False
+    try:
+        method, path, query, body, headers = build_request(def_, params)
+        payload = await http_request(def_.endpoint, method, path, query=query, body=body, headers=headers)
+        records, truncated = parse_response(def_, payload)
+        text = await format_result(def_, records, truncated)
+    except (ToolInputError, HttpError) as exc:
+        # 入参非法 / 执行被拒：记审计与链路后向上抛，由工具层转为模型可读提示
+        audit_logger.warning(
+            "工具调用未执行（入参或执行被拒）",
+            tool=def_.name, endpoint=def_.endpoint, method=method, path=path,
+            params=params, error=str(exc),
+        )
+        conversation_logger.warning("工具调用被拒", tool=def_.name, error=str(exc))
+        raise
+    duration_ms = round((time.perf_counter() - started) * 1000)
+    full_url = f"{get_base_url(def_.endpoint).rstrip('/')}{path}"
+    audit_logger.info(
+        "工具调用完成",
+        tool=def_.name, endpoint=def_.endpoint, method=method, url=full_url,
+        params=params, rows=len(records), truncated=truncated, duration_ms=duration_ms,
+    )
+    conversation_logger.info(
+        "工具调用",
+        tool=def_.name, params=params,
+        rows=len(records), truncated=truncated, duration_ms=duration_ms,
+    )
+    return text

@@ -1,0 +1,107 @@
+# 设备维修记录域工具定义（template，2026-08-20 新增）
+#
+# 维修记录为"基础表(母表) + 子表" 1:1 联合查询：单据编号/状态/时间在基础表，
+# 设备/异常/处理细节在子表。declarative 单表引擎无法跨表取列，故走 template 能力包。
+# - 母表被多个业务模型共用，恒以 doctype 判别本模型数据。
+# - enabled=1（只查有效数据，template 无 default_filters，故内联常量）。
+# - 设备编号直接关联根表 MBSEQUIPMENT.CODE（业务方已确认同体系），凭编号直达。
+# - 时间/状态为可选入参，用 ":x IS NULL OR ..." NULL 容忍惯用法（template SQL 固定，
+#   不按参数有无动态删 WHERE）；date 型入参由引擎自动换算 last_* 相对时间。
+# - 表名须带 BASIC. 前缀（只读账号访问）。
+
+- name: query_repair_apply
+  description: 按设备编号查询该设备的维修申请记录（单据编号、提交日期、状态、审批阶段、申请公司/部门/人、设备、异常现象等基础表+子表完整字段），按提交日期倒序，最多 20 条。用于回答"某台设备报修/维修申请/维修履历"等记录类问题。需先经 query_device_list 取得唯一设备编号后调用。
+  mode: template
+  db: mes
+  sql: |
+    SELECT b.docno AS 单据编号,
+           b.submitdate AS 申请日期,
+           b.state AS 单据状态,
+           b.latestphase AS 审批阶段,
+           b.orgname AS 申请公司,
+           b.deptname AS 申请部门,
+           b.username AS 申请人,
+           d.equipmentcode AS 设备编号,
+           d.equipmentname AS 设备名称,
+           d.equipmentlineno AS 设备线体,
+           d.problemdescription AS 异常现象
+    FROM BASIC.MESQMPROBLEMAPPLY b
+    JOIN BASIC.MESQMPROBLEMAPPLYEQUIPPROP d ON d.applyid = b.id
+    WHERE b.doctype = 'mesQmProblemApplyEquipProp'
+      AND b.enabled = 1
+      AND d.enabled = 1
+      AND d.equipmentcode = :device_code
+      AND (:date_from IS NULL OR b.submitdate >= TO_DATE(:date_from, 'YYYY-MM-DD'))
+      AND (:date_to IS NULL OR b.submitdate < TO_DATE(:date_to, 'YYYY-MM-DD') + 1)
+      AND (:state IS NULL OR b.state = :state)
+    ORDER BY b.submitdate DESC
+  translate_columns:
+    单据状态: CboItems.TapApprovalBillState
+    申请公司: CboOrg
+    申请人: CboUser
+  params:
+    - name: device_code
+      type: string
+      description: 设备编号（必填，来自 query_device_list 的唯一设备编号）
+      required: true
+    - name: date_from
+      type: date
+      description: 起始日期（可选，YYYY-MM-DD 或 last_1d/1w/1m/1y，不填则不限制）
+    - name: date_to
+      type: date
+      description: 结束日期（可选，YYYY-MM-DD 或 last_1d/1w/1m/1y，不填则不限制）
+    - name: state
+      type: string
+      description: 单据状态（可选，不填则不限制）
+  limit: 20
+
+- name: query_repair_task
+  description: 按设备编号查询该设备的维修任务记录（任务单号、任务名称、提交日期、状态、设备、异常现象/原因、解决方式、备件、措施详情、解决结果、解决人员等基础表+子表完整字段），按提交日期倒序，最多 20 条。用于回答"某台设备的维修任务/派工/维修履历(处理结果)"等记录类问题。需先经 query_device_list 取得唯一设备编号后调用。
+  mode: template
+  db: mes
+  sql: |
+    SELECT b.docno AS 任务单号,
+           b.name AS 任务名称,
+           b.submitdate AS 提交日期,
+           b.state AS 单据状态,
+           d.equipmentdocno AS 设备编号,
+           d.equipmentname AS 设备名称,
+           d.problemdescription AS 异常现象,
+           d.problemreason AS 异常原因,
+           d.solution AS 解决方式,
+           d.partitemcode AS 备件料号,
+           d.partitemname AS 备件名称,
+           d.partamount AS 备件数量,
+           d.dealways AS 措施详情,
+           d.dealresult AS 解决结果,
+           d.dealtime AS 解决时间,
+           d.dealuserid AS 解决人员
+    FROM BASIC.MESQMDISPATCHTASK b
+    JOIN BASIC.MesQmDispatchTaskEquipProp d ON d.taskid = b.id
+    WHERE b.doctype = 'mesQmDispatchTaskEquipProp'
+      AND b.enabled = 1
+      AND d.enabled = 1
+      AND d.equipmentdocno = :device_code
+      AND (:date_from IS NULL OR b.submitdate >= TO_DATE(:date_from, 'YYYY-MM-DD'))
+      AND (:date_to IS NULL OR b.submitdate < TO_DATE(:date_to, 'YYYY-MM-DD') + 1)
+      AND (:state IS NULL OR b.state = :state)
+    ORDER BY b.submitdate DESC
+  translate_columns:
+    单据状态: CboItems.TapApprovalBillState
+    解决结果: CboItems.MesQmDispatchTaskDealResult
+    解决人员: CboUser
+  params:
+    - name: device_code
+      type: string
+      description: 设备编号（必填，来自 query_device_list 的唯一设备编号）
+      required: true
+    - name: date_from
+      type: date
+      description: 起始日期（可选，YYYY-MM-DD 或 last_1d/1w/1m/1y，不填则不限制）
+    - name: date_to
+      type: date
+      description: 结束日期（可选，YYYY-MM-DD 或 last_1d/1w/1m/1y，不填则不限制）
+    - name: state
+      type: string
+      description: 单据状态（可选，不填则不限制）
+  limit: 20

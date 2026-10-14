@@ -1,0 +1,43 @@
+# 工艺数据比对外部接口工具：按销售申请单号及行号（CRM单号行号）查询订单评审表参数数据（只读）。
+#
+# body 模板声明整段请求体：templateid/paramOptional/pageSize/pageNum 固定字段原样下发，
+# {param} 占位符由引擎替换为参数值（参数在 params 声明）。paramsMap 下的
+# sourcedocno / sourcedoclineno 即用户输入的销售申请单号（CRM单号）及其行号。
+# 返回订单评审表上每个参数的编码/名称/取值（dataList，一行为一个参数）。
+# 响应以 success=true 判定业务成功，数据列表在 result.dataList。
+
+- name: crm_OrtViewList
+  description: 按销售申请单号及行号（CRM单号行号）查询订单评审表参数数据（只读查询接口）。返回该销售申请单订单评审表上各参数的名称与值（如电表型号、电压规格、密码权限、包装料号、特殊要求等）。用于回答"查订单评审表参数 / 查评审参数明细 / 查某销售申请单评审各参数取值"等问题。
+  endpoint: crm-service
+  method: POST
+  path: /ort/review_queryOrtReviewLineByMes.json
+  body:
+    templateid: QueryOrtReviewLine
+    paramOptional: true
+    pageSize: 0
+    pageNum: 0
+    paramsMap:
+      sourcedocno: "{sourcedocno}"
+      sourcedoclineno: "{sourcedoclineno}"
+  params:
+    - name: sourcedocno
+      type: string
+      description: 销售申请单号（CRM单号，精确匹配，必填，如 CH26072800004）
+      required: true
+      location: body
+    - name: sourcedoclineno
+      type: string
+      description: 销售申请单行号（CRM行号，精确匹配，必填，如 3）
+      required: true
+      location: body
+  result_path: result.dataList
+  success_field: success
+  success_value: true
+  columns:
+    # - "sourcedocno: 销售申请单号"
+    # - "sourcedoclineno: 销售申请单行号"
+    # - "ordernumber: 订购数量"
+    - "paraname: 参数名称"
+    - "paravalue: 参数值"
+    - "paracode: 参数编码"
+  limit: 200
